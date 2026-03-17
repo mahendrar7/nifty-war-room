@@ -154,7 +154,7 @@ from position_sizing import (
 
 init(autoreset=True)
 
-# Global — toggled by Meta+D hotkey
+# Global — toggled by Ctrl+D hotkey
 DEBUG_MODE = False
 
 # =============================================================================
@@ -653,7 +653,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
               f"₹{t['price']:.0f}  ×{t['lots']}lot  "
               f"Stop:₹{t['stop']:.0f}  Target:₹{t['target']:.0f}  "
               f"Risk:₹{t['risk']:,.0f}")
-        print(f"  {Fore.WHITE}Meta+T → log entry  │  Meta+X → exit{Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}Meta+I / Ctrl+T → log entry  │  Meta+X / Ctrl+X → exit{Style.RESET_ALL}")
     else:
         no_trade_reason = "STAY OUT"
         if bias == "RANGE" and (not trap or trap["confidence"] < 60) \
@@ -719,7 +719,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
     print("=" * 63)
 
     # ==========================================================================
-    # DEBUG — gated on Meta+D
+    # DEBUG — gated on Ctrl+D
     # ==========================================================================
     if DEBUG_MODE:
         print_divider(char="-")
@@ -1014,15 +1014,31 @@ def run_logger():
 # HOTKEYS
 # =============================================================================
 def start_hotkey_listener():
+    """
+    Hotkeys — supports BOTH Meta and Ctrl variants:
+      Ctrl+D / Meta+D  → toggle debug
+      Ctrl+T / Meta+I  → log trade entry
+      Ctrl+X / Meta+X  → exit trade
+
+    Meta+D sends ^D (EOF) to macOS terminal — we catch and ignore it.
+    The Ctrl variants are cleaner on macOS.
+    """
     try:
         from pynput import keyboard
 
         _held = set()
-        _candidate_keys = ["cmd", "cmd_l", "cmd_r", "meta", "meta_l", "meta_r"]
+
         META_KEYS = set()
-        for _k in _candidate_keys:
+        for _k in ["cmd", "cmd_l", "cmd_r", "meta", "meta_l", "meta_r"]:
             try:
                 META_KEYS.add(getattr(keyboard.Key, _k))
+            except AttributeError:
+                pass
+
+        CTRL_KEYS = set()
+        for _k in ["ctrl", "ctrl_l", "ctrl_r"]:
+            try:
+                CTRL_KEYS.add(getattr(keyboard.Key, _k))
             except AttributeError:
                 pass
 
@@ -1030,27 +1046,34 @@ def start_hotkey_listener():
             global DEBUG_MODE
             _held.add(key)
             meta_held = bool(_held & META_KEYS)
+            ctrl_held = bool(_held & CTRL_KEYS)
             try:
                 char = key.char if hasattr(key, "char") else None
             except Exception:
                 char = None
 
-            if meta_held and char == "d":
+            # Debug toggle: Meta+D or Ctrl+D
+            if (meta_held and char == "d") or (ctrl_held and char == "\x04"):
                 DEBUG_MODE = not DEBUG_MODE
                 status = Fore.CYAN + "🔍 DEBUG ON" if DEBUG_MODE else Fore.WHITE + "🔕 DEBUG OFF"
                 print(f"\n{'─' * 40}\n  {status}{Style.RESET_ALL}  (takes effect next print)\n{'─' * 40}")
-            elif meta_held and char == "i":
+
+            # Trade entry: Meta+I or Ctrl+T
+            elif (meta_held and char == "i") or (ctrl_held and char == "\x14"):
                 _register_trade_entry()
-            elif meta_held and char == "x":
+
+            # Trade exit: Meta+X or Ctrl+X
+            elif (meta_held and char == "x") or (ctrl_held and char == "\x18"):
                 _register_trade_exit()
 
         def on_release(key):
             _held.discard(key)
 
-        listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        listener = keyboard.Listener(on_press=on_press, on_release=on_release,
+                                     suppress=False)
         listener.daemon = True
         listener.start()
-        print("⌨  Meta+D: debug  │  Meta+T: log entry  │  Meta+X: exit trade")
+        print("⌨  Meta+I / Ctrl+T: log entry  │  Meta+X / Ctrl+X: exit  │  Meta+D / Ctrl+D: debug")
 
     except ImportError:
         print("⚠  pynput not installed — pip install pynput")
@@ -1078,14 +1101,22 @@ def _register_trade_entry():
             f"| ×{s['lots']} | Stop ₹{s['stop']:.0f} | Target ₹{s['target']:.0f} | {now}"
         )
     else:
+        # No suggestion cached — offer manual entry via /dev/tty
+        # (avoids EOF from Meta+key poisoning stdin)
         import threading
+        import sys
+
         def _manual():
+            tty = None
             try:
-                print(f"\n{'─' * 50}\n  No suggestion cached. Enter details:")
-                strike = int(input("  Strike: ").strip())
-                opt_type = input("  CE/PE: ").strip().upper()
-                entry_price = float(input("  Entry price: ").strip())
-                lots = int(input("  Lots: ").strip())
+                # Always read from /dev/tty — immune to stdin EOF
+                tty = open("/dev/tty", "r")
+                print(f"\n{'─' * 50}")
+                print(f"  {Fore.YELLOW}No suggestion cached.{Style.RESET_ALL} Enter details:")
+                strike      = int(tty.readline().rstrip() or _prompt_tty(tty, "  Strike: "))
+                opt_type    = _prompt_tty(tty, "  CE/PE: ").upper()
+                entry_price = float(_prompt_tty(tty, "  Entry price: "))
+                lots        = int(_prompt_tty(tty, "  Lots: "))
                 state.active_trade = {
                     "strike": strike, "option_type": opt_type,
                     "entry_price": entry_price, "entry_time": now,
@@ -1093,11 +1124,27 @@ def _register_trade_entry():
                 }
                 msg = f"✅ MANUAL: {strike} {opt_type} ₹{entry_price:.0f} ×{lots} | {now}"
                 print(f"  {Fore.GREEN}{msg}{Style.RESET_ALL}\n{'─' * 50}")
-                send_telegram_message(f"🟢 MANUAL ENTRY: {strike} {opt_type} @ ₹{entry_price:.0f} | ×{lots} | {now}")
-            except Exception as e:
+                send_telegram_message(
+                    f"🟢 MANUAL ENTRY: {strike} {opt_type} @ ₹{entry_price:.0f} | ×{lots} | {now}"
+                )
+            except (EOFError, ValueError, OSError) as e:
                 print(f"  ⚠ Entry cancelled: {e}")
+            finally:
+                if tty:
+                    tty.close()
 
         threading.Thread(target=_manual, daemon=True).start()
+
+
+def _prompt_tty(tty, prompt):
+    """Print prompt to stdout, read from /dev/tty."""
+    import sys
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    line = tty.readline()
+    if not line:
+        raise EOFError("tty closed")
+    return line.strip()
 
 
 def _register_trade_exit():
