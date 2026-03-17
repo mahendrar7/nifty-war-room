@@ -87,3 +87,51 @@ MPM_WEIGHTS = {
 MPM_GAMMA_AMP    = 1.20
 MPM_GAMMA_DAMP   = 0.85
 MPM_CONFLICT_PEN = 0.75
+
+# -----------------------------
+# TREND DETECTION
+# -----------------------------
+TREND_WINDOW_MINUTES  = 30     # look back this far to detect persistent trends
+TREND_MIN_MOVE_MULT   = 1.0   # must move ≥ 1× expected move to qualify
+TREND_TRAP_SUPPRESS   = 0.40  # suppress trap confidence to 40% in trends
+TREND_BIAS_BOOST      = 30    # add this to directional confidence in trends
+
+# -----------------------------
+# WALL RETREAT DETECTION
+# -----------------------------
+WALL_HISTORY_LENGTH   = 10    # track last N wall positions
+WALL_RETREAT_STRIKES  = 2     # wall retreated ≥ 2 strikes = retreating
+WALL_RETREAT_TRAP_PEN = 0.50  # halve trap confidence when wall retreating
+
+# -----------------------------
+# EXPIRY THETA NORMALISATION
+# -----------------------------
+EXPIRY_THETA_NORM_DTE = [0, 1]   # on these DTE values, normalise straddle momentum
+THETA_DECAY_RATE_PER_5M = -1.5   # expected ~1.5% decay per 5min on expiry day
+
+# -----------------------------
+# ML KILL SWITCH
+# -----------------------------
+ML_CONSECUTIVE_WRONG_KILL = 5     # after N consecutive wrong, suppress to neutral
+ML_RECENT_ACCURACY_KILL   = 0.25  # if last 10 accuracy < 25%, suppress
+
+# -----------------------------
+# SIGNAL THROTTLE INTERVALS
+# These signals are computed every N minutes instead of every tick.
+# Signals not listed here are computed every tick (1 minute).
+# -----------------------------
+THROTTLE_INTERVALS = {
+    "trap":           5,    # trap classifier — 5 min
+    "vacuum":         5,    # liquidity vacuum — 5 min
+    "wall_break":     5,    # wall break vacuum — 5 min
+    "move_prob":      3,    # move probability meter — 3 min
+    "strike_war":     5,    # strike war detection — 5 min
+    "magnet":         5,    # dealer magnet — 5 min
+    "best_option":    5,    # best option to buy — 5 min
+    "gravity":        3,    # premium gravity — 3 min
+    "pcr":            3,    # put/call ratio — 3 min
+    "oi_imbalance":   3,    # OI imbalance — 3 min
+}
+# Computed every tick (1 min): spot, gamma, GEX, straddle, walls,
+# flip level, OI change, velocity, bias, regime, acceleration,
+# flip breakout, gamma squeeze, HTL

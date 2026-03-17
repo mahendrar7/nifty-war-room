@@ -172,36 +172,69 @@ def compute_position_size(option_price, regime, confidence,
 
 def suggest_trade(spot, straddle, bias, df, gamma, flip_level,
                   regime, confidence, trap, ml_signal, days_to_expiry,
-                  flip_breakout=None, velocity=None, liq_accel=None):
+                  flip_breakout=None, velocity=None, liq_accel=None,
+                  trend=None):
     """
-    Four independent paths to a trade:
+    Four independent paths to a trade — REORDERED (v2):
       1. Directional bias
-      2. Trap fade (RANGE ok, gamma >= 0 required)
-      3. Gamma flip breakout
-      4. Liquidity acceleration
+      2. Gamma flip breakout        (was path 3 — promoted)
+      3. Liquidity acceleration     (was path 4 — promoted)
+      4. Trap fade                  (was path 2 — demoted)
+
+    FIX: Structural signals (flip breakout, acceleration) now take priority
+    over trap fades. Previously, a 60% trap would block a 70-score
+    acceleration from generating a trade.
+
+    FIX: Trend-aware directional boost — if a persistent trend is detected
+    in the same direction as bias, confidence is boosted and the directional
+    path can fire even when the regime tracker hasn't confirmed yet.
     """
+    from config import TREND_BIAS_BOOST
+
     expected_move = straddle / 2
     trap_conf     = trap["confidence"] if trap else 0
     trade_type    = None
     direction     = None
 
-    if bias in ("BULLISH", "BEARISH") and _get_regime_risk(regime) > 0:
+    # Trend-boosted confidence for directional path
+    effective_confidence = confidence
+    effective_bias       = bias
+    if trend and trend["trending"]:
+        if trend["direction"] == "UP" and bias in ("BULLISH", "RANGE"):
+            effective_confidence = min(confidence + TREND_BIAS_BOOST, 100)
+            effective_bias = "BULLISH"
+        elif trend["direction"] == "DOWN" and bias in ("BEARISH", "RANGE"):
+            effective_confidence = min(confidence + TREND_BIAS_BOOST, 100)
+            effective_bias = "BEARISH"
+
+    # Path 1: Directional bias
+    if effective_bias in ("BULLISH", "BEARISH") and _get_regime_risk(regime) > 0:
         if trap_conf < 80:
-            direction, trade_type = ("CALL" if bias == "BULLISH" else "PUT"), "directional"
+            direction, trade_type = ("CALL" if effective_bias == "BULLISH" else "PUT"), "directional"
 
-    if direction is None and trap_conf >= 60 and gamma >= 0:
-        if trap["type"] == "BULL TRAP":
-            direction, trade_type = "PUT", "trap_fade"
-        elif trap["type"] == "BEAR TRAP":
-            direction, trade_type = "CALL", "trap_fade"
-
+    # Path 2: Gamma flip breakout (PROMOTED from path 3)
     if direction is None and flip_breakout and flip_breakout["detected"]:
         direction  = "CALL" if flip_breakout["direction"] == "UPSIDE" else "PUT"
         trade_type = "flip_breakout"
 
+    # Path 3: Liquidity acceleration (PROMOTED from path 4)
     if direction is None and liq_accel and liq_accel["detected"]:
         direction  = "CALL" if liq_accel["direction"] == "UPSIDE" else "PUT"
         trade_type = "liq_accel"
+
+    # Path 4: Trap fade (DEMOTED from path 2)
+    if direction is None and trap_conf >= 60 and gamma >= 0:
+        # Additional guard: don't fade into a persistent trend
+        trend_blocks = False
+        if trend and trend["trending"]:
+            if (trap["type"] == "BULL TRAP" and trend["direction"] == "UP") or \
+               (trap["type"] == "BEAR TRAP" and trend["direction"] == "DOWN"):
+                trend_blocks = True
+        if not trend_blocks:
+            if trap["type"] == "BULL TRAP":
+                direction, trade_type = "PUT", "trap_fade"
+            elif trap["type"] == "BEAR TRAP":
+                direction, trade_type = "CALL", "trap_fade"
 
     if direction is None:
         return None
@@ -226,7 +259,7 @@ def suggest_trade(spot, straddle, bias, df, gamma, flip_level,
     lots = compute_position_size(
         option_price    = price,
         regime          = effective_regime,
-        confidence      = confidence if trade_type == "directional" else max(trap_conf, 50),
+        confidence      = effective_confidence if trade_type == "directional" else max(trap_conf, 50),
         trap_confidence = 0 if trade_type == "trap_fade" else trap_conf,
         ml_signal       = ml_signal,
         days_to_expiry  = days_to_expiry,

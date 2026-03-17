@@ -64,6 +64,7 @@ class MarketState:
     def __init__(self):
         self.previous_snapshot   = None
         self.previous_gamma      = None
+        self.previous_spot       = None          # FIX: track actual spot price
         self.breakout_counter    = 0
         self.breakout_direction  = None
         self.breakout_strike     = None
@@ -78,10 +79,25 @@ class MarketState:
         self.active_trade        = None
         self.last_suggestion     = None
 
+        # NEW: wall retreat tracking
+        self.call_wall_history   = deque(maxlen=10)
+        self.put_wall_history    = deque(maxlen=10)
+
+        # NEW: spot history for trend detection
+        self.spot_history        = deque(maxlen=60)  # last 60 minutes
+
+        # NEW: throttle cache for slow-compute signals
+        self.throttle_cache      = {}   # {"signal_name": {"tick": N, "result": ...}}
+        self.tick_counter        = 0    # incremented every main loop iteration
+
+        # NEW: ML consecutive wrong counter
+        self.ml_consecutive_wrong = 0
+
     def reset_session(self):
         """Called at market close to wipe intraday state."""
         self.previous_snapshot   = None
         self.previous_gamma      = None
+        self.previous_spot       = None
         self.breakout_counter    = 0
         self.breakout_direction  = None
         self.breakout_strike     = None
@@ -95,6 +111,12 @@ class MarketState:
         self.active_trade        = None
         self.last_suggestion     = None
         self.regime_tracker      = RegimeTracker(min_confirm=3)
+        self.call_wall_history.clear()
+        self.put_wall_history.clear()
+        self.spot_history.clear()
+        self.throttle_cache.clear()
+        self.tick_counter        = 0
+        self.ml_consecutive_wrong = 0
 
 
 # Singleton — all modules import this instance

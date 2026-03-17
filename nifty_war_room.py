@@ -144,6 +144,7 @@ from detectors import (
     detect_gamma_flip_breakout, detect_liquidity_acceleration,
     compute_next_wall_distance, hold_the_line,
     compute_move_probability,
+    detect_persistent_trend, should_compute, cache_result, get_cached,
 )
 from position_sizing import (
     compute_trade_mode, interpret_market,
@@ -198,34 +199,73 @@ def colored_bias(bias):
 def print_dashboard(df, spot, atm, momentum_strikes, expiry):
     prev = state.previous_snapshot
 
+    # ── Increment tick counter for throttle system ─────────────────────────
+    state.tick_counter += 1
+
     # ── Compute all signals ────────────────────────────────────────────────
     df = compute_strike_gammas(df, spot, expiry)
     call_wall, put_wall = compute_oi_walls(df)
+
+    # FIX: track wall history for retreat detection
+    state.call_wall_history.append(call_wall)
+    state.put_wall_history.append(put_wall)
+
     straddle = compute_straddle(df, atm)
     momentum_data = update_straddle(straddle)
     gamma = compute_gamma_pressure(df, spot, expiry)
     gamma_flip = detect_gamma_flip(gamma, state.previous_gamma)
     gamma_wall = compute_gamma_wall(df, spot, expiry)
-    gravity = compute_premium_gravity(df)
+
+    # Throttled signals — use cache if not due for recompute
+    if should_compute("gravity"):
+        gravity = compute_premium_gravity(df)
+        cache_result("gravity", gravity)
+    else:
+        gravity = get_cached("gravity", int(df["strike"].median()))
+
     oi_signal = compute_oi_change(df, prev)
-    pcr_signal, pcr_val = compute_pcr(df)
-    best_call, best_put = best_option_to_buy(df, spot)
+
+    if should_compute("pcr"):
+        pcr_signal, pcr_val = compute_pcr(df)
+        cache_result("pcr", (pcr_signal, pcr_val))
+    else:
+        pcr_signal, pcr_val = get_cached("pcr", ("NEUTRAL", 1.0))
+
+    if should_compute("best_option"):
+        best_call, best_put = best_option_to_buy(df, spot)
+        cache_result("best_option", (best_call, best_put))
+    else:
+        best_call, best_put = get_cached("best_option", (atm + 100, atm - 100))
 
     bias, confidence = compute_market_bias(
         spot, gravity, call_wall, put_wall, oi_signal, pcr_signal
     )
 
-    prev_spot = (state.previous_snapshot["call_ltp"].mean()
-                 if state.previous_snapshot is not None else None)
+    # FIX: use actual previous spot price, not call_ltp mean
+    prev_spot = state.previous_spot
+    # Track spot history for trend detection
+    state.spot_history.append(spot)
+
     days_to_expiry = (expiry - datetime.now().date()).days
     momentum_5m = momentum_data["momentum_5m"] if momentum_data else None
 
-    trap = classify_option_trap(
-        spot=spot, prev_spot=prev_spot, call_wall=call_wall,
-        put_wall=put_wall, gamma=gamma, gamma_wall=gamma_wall,
-        oi_signal=oi_signal, straddle=straddle,
-        straddle_momentum=momentum_5m, days_to_expiry=days_to_expiry, atm=atm,
-    )
+    # FIX: Trend detection — feeds into trap suppression and trade suggestion
+    expected_move = straddle / 2
+    trend = detect_persistent_trend(spot, expected_move)
+
+    # Trap — throttled to 5 minutes
+    if should_compute("trap"):
+        trap = classify_option_trap(
+            spot=spot, prev_spot=prev_spot, call_wall=call_wall,
+            put_wall=put_wall, gamma=gamma, gamma_wall=gamma_wall,
+            oi_signal=oi_signal, straddle=straddle,
+            straddle_momentum=momentum_5m, days_to_expiry=days_to_expiry, atm=atm,
+        )
+        cache_result("trap", trap)
+    else:
+        trap = get_cached("trap", {"type": "NONE", "confidence": 0,
+                                    "fade_strike": None, "fade_type": None,
+                                    "reversal_lvl": None, "reason": []})
     trap_prob = trap["confidence"]
 
     count, direction, strike = breakout_countdown(
@@ -234,23 +274,50 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
 
     mode = compute_trade_mode(bias, trap_prob, count, momentum_strikes, gamma)
     gamma_shift = classify_gamma_shift(compute_gamma_shift(gamma, state.previous_gamma))
-    magnet_strike, magnet_prob = compute_dealer_magnet(df, spot)
+
+    if should_compute("magnet"):
+        magnet_strike, magnet_prob = compute_dealer_magnet(df, spot)
+        cache_result("magnet", (magnet_strike, magnet_prob))
+    else:
+        magnet_strike, magnet_prob = get_cached("magnet", (atm, 50))
 
     flip_level = find_gamma_flip_level(df, spot)
     squeeze = detect_gamma_squeeze(gamma, momentum_data, oi_signal)
-    war_strike, war_status = detect_strike_war(df, spot)
-    war_break = detect_strike_war_break(df, prev, war_strike, spot)
+
+    if should_compute("strike_war"):
+        war_strike, war_status = detect_strike_war(df, spot)
+        war_break = detect_strike_war_break(df, prev, war_strike, spot)
+        cache_result("strike_war", (war_strike, war_status, war_break))
+    else:
+        war_strike, war_status, war_break = get_cached("strike_war", (None, None, None))
 
     velocity, call_oi_speed, put_oi_speed = compute_oi_velocity(
         df, prev, straddle_momentum=momentum_5m
     )
-    oi_imbalance = compute_oi_imbalance(df)
 
-    vacuum = detect_liquidity_vacuum(
-        df=df, prev_df=prev, spot=spot,
-        gamma=gamma, straddle_momentum=momentum_5m,
-    )
-    wall_break_vac = detect_wall_break_vacuum(df, prev, spot, gamma)
+    if should_compute("oi_imbalance"):
+        oi_imbalance = compute_oi_imbalance(df)
+        cache_result("oi_imbalance", oi_imbalance)
+    else:
+        oi_imbalance = get_cached("oi_imbalance", None)
+
+    if should_compute("vacuum"):
+        vacuum = detect_liquidity_vacuum(
+            df=df, prev_df=prev, spot=spot,
+            gamma=gamma, straddle_momentum=momentum_5m,
+        )
+        cache_result("vacuum", vacuum)
+    else:
+        vacuum = get_cached("vacuum", {"detected": False, "status": "NONE", "score": 0,
+                                        "direction": None, "reason": []})
+
+    if should_compute("wall_break"):
+        wall_break_vac = detect_wall_break_vacuum(df, prev, spot, gamma)
+        cache_result("wall_break", wall_break_vac)
+    else:
+        wall_break_vac = get_cached("wall_break", {"detected": False, "direction": None,
+                                                     "reason": []})
+
     liq_accel = detect_liquidity_acceleration(
         spot=spot, prev_spot=prev_spot, momentum_data=momentum_data,
         call_oi_speed=call_oi_speed, put_oi_speed=put_oi_speed,
@@ -259,11 +326,18 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         spot=spot, prev_spot=prev_spot,
         flip_level=flip_level, straddle_momentum=momentum_5m,
     )
-    move_prob = compute_move_probability(
-        gamma=gamma, momentum_data=momentum_data, velocity=velocity,
-        vacuum=vacuum, wall_break=wall_break_vac, flip_breakout=flip_breakout,
-        acceleration=liq_accel, momentum_strikes=momentum_strikes,
-    )
+
+    if should_compute("move_prob"):
+        move_prob = compute_move_probability(
+            gamma=gamma, momentum_data=momentum_data, velocity=velocity,
+            vacuum=vacuum, wall_break=wall_break_vac, flip_breakout=flip_breakout,
+            acceleration=liq_accel, momentum_strikes=momentum_strikes,
+        )
+        cache_result("move_prob", move_prob)
+    else:
+        move_prob = get_cached("move_prob", {"probability": 0, "direction": "UNCLEAR",
+                                              "conviction": "LOW", "active_signals": [],
+                                              "reasons": [], "conflicted": False})
 
     regime, action = interpret_market(
         spot, atm, bias, confidence, gamma, gamma_flip,
@@ -308,11 +382,17 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         bypassed = True
 
     state.previous_gamma = gamma
+    state.previous_spot  = spot   # FIX: store actual spot for next tick
 
     # ── ML signal agreement ───────────────────────────────────────────────
     if state.last_ml_result is not None:
         ml_bias_str = _ml_bias_to_str(state.last_ml_result["signal"])
-        if state.last_ml_result["signal"] == 0:
+
+        # FIX: ML kill switch — suppress ML when it's been consistently wrong
+        from config import ML_CONSECUTIVE_WRONG_KILL
+        ml_killed = state.ml_consecutive_wrong >= ML_CONSECUTIVE_WRONG_KILL
+
+        if ml_killed or state.last_ml_result["signal"] == 0:
             ml_signal = "neutral"
         elif ml_bias_str == bias:
             ml_signal = "agree"
@@ -540,6 +620,16 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
     # ACTION + TRADE
     # ==========================================================================
     print_divider()
+
+    # Show trend status if detected
+    if trend and trend["trending"]:
+        trend_color = Fore.GREEN if trend["direction"] == "UP" else Fore.RED
+        trend_arrow = "📈" if trend["direction"] == "UP" else "📉"
+        print(trend_color +
+              f"{trend_arrow} TREND: {trend['direction']} "
+              f"{trend['move_pts']}pts over {trend['duration_minutes']}min"
+              + Style.RESET_ALL)
+
     print(Fore.GREEN + f"ACTION: {action}" + Style.RESET_ALL)
 
     trade = suggest_trade(
@@ -547,6 +637,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         flip_level=flip_level, regime=regime, confidence=confidence,
         trap=trap, ml_signal=ml_signal, days_to_expiry=days_to_expiry,
         flip_breakout=flip_breakout, velocity=velocity, liq_accel=liq_accel,
+        trend=trend,
     )
 
     if trade:
@@ -634,6 +725,19 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         print_divider(char="-")
         print(f"GEX:{int(gamma):,}  Dealer:{gamma_shift}  OI:{oi_signal}")
         print(f"Magnet:{magnet_strike}({magnet_prob}%)  GammaWall:{gamma_wall}  Mode:{mode}")
+        # NEW: trend and wall retreat debug
+        if trend and trend["trending"]:
+            print(Fore.CYAN + f"TREND: {trend['direction']} {trend['move_pts']}pts "
+                  f"over {trend['duration_minutes']}min" + Style.RESET_ALL)
+        from detectors import detect_wall_retreat
+        cw_ret, cw_cnt = detect_wall_retreat("call")
+        pw_ret, pw_cnt = detect_wall_retreat("put")
+        if cw_ret or pw_ret:
+            print(f"Wall retreat: call={'YES' if cw_ret else 'no'}({cw_cnt})  "
+                  f"put={'YES' if pw_ret else 'no'}({pw_cnt})")
+        if state.ml_consecutive_wrong >= 3:
+            print(Fore.YELLOW + f"ML streak: {state.ml_consecutive_wrong} wrong in a row"
+                  + Style.RESET_ALL)
         if pcr_signal == "NEUTRAL":
             print(f"PCR:{pcr_val} (NEUTRAL)")
         if momentum_strikes:
@@ -725,6 +829,19 @@ def _print_feedback_verdicts(resolved):
             f"{r['verdict']} ML: called {sig_label} @ {r['spot_at_signal']:.0f} | "
             f"moved {move_str}pts | ±{r['x_points']:.0f}pts → {r['outcome'].upper()}"
         )
+
+        # FIX: Track consecutive wrong for ML kill switch
+        if r["outcome"] == "wrong":
+            state.ml_consecutive_wrong += 1
+        else:
+            state.ml_consecutive_wrong = 0
+
+        from config import ML_CONSECUTIVE_WRONG_KILL
+        if state.ml_consecutive_wrong >= ML_CONSECUTIVE_WRONG_KILL:
+            print(Fore.YELLOW +
+                  f"  ⚠ ML KILLED: {state.ml_consecutive_wrong} consecutive wrong — "
+                  f"suppressing to neutral until correct"
+                  + Style.RESET_ALL)
 
 
 # =============================================================================
@@ -922,7 +1039,7 @@ def start_hotkey_listener():
                 DEBUG_MODE = not DEBUG_MODE
                 status = Fore.CYAN + "🔍 DEBUG ON" if DEBUG_MODE else Fore.WHITE + "🔕 DEBUG OFF"
                 print(f"\n{'─' * 40}\n  {status}{Style.RESET_ALL}  (takes effect next print)\n{'─' * 40}")
-            elif meta_held and char == "t":
+            elif meta_held and char == "i":
                 _register_trade_entry()
             elif meta_held and char == "x":
                 _register_trade_exit()

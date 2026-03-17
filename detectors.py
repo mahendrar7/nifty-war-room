@@ -21,6 +21,126 @@ from state import state
 
 
 # =============================================================================
+# WALL RETREAT DETECTION
+# =============================================================================
+
+def detect_wall_retreat(direction="call"):
+    """
+    Check whether the call or put wall has retreated (moved in the direction
+    of price) over the last N observations. A retreating wall means the
+    'resistance' is fake — institutions are adjusting, not defending.
+    Returns (is_retreating: bool, retreat_count: int).
+    """
+    from config import WALL_RETREAT_STRIKES
+    history = (state.call_wall_history if direction == "call"
+               else state.put_wall_history)
+    if len(history) < 3:
+        return False, 0
+    strikes = list(history)
+    if direction == "call":
+        # Call wall retreating = moving UP (resistance giving way)
+        retreats = sum(1 for i in range(1, len(strikes)) if strikes[i] > strikes[i - 1])
+    else:
+        # Put wall retreating = moving DOWN (support giving way)
+        retreats = sum(1 for i in range(1, len(strikes)) if strikes[i] < strikes[i - 1])
+    return retreats >= WALL_RETREAT_STRIKES, retreats
+
+
+# =============================================================================
+# TREND DETECTION
+# =============================================================================
+
+def detect_persistent_trend(spot, expected_move):
+    """
+    Detect a persistent intraday trend by looking at spot history.
+    If spot has moved ≥ TREND_MIN_MOVE_MULT × expected_move in one direction
+    over the last TREND_WINDOW_MINUTES, this is a trending regime where
+    mean-reversion signals (traps) should be suppressed.
+
+    Returns: {"trending": bool, "direction": "UP"/"DOWN"/None,
+              "move_pts": float, "duration_minutes": int}
+    """
+    from config import TREND_WINDOW_MINUTES, TREND_MIN_MOVE_MULT
+    history = list(state.spot_history)
+    if len(history) < 10:  # need at least 10 minutes
+        return {"trending": False, "direction": None, "move_pts": 0, "duration_minutes": 0}
+
+    # Use the window or full history, whichever is shorter
+    window = history[-TREND_WINDOW_MINUTES:]
+    move = spot - window[0]
+    threshold = expected_move * TREND_MIN_MOVE_MULT
+
+    if abs(move) >= threshold:
+        direction = "UP" if move > 0 else "DOWN"
+        return {
+            "trending": True,
+            "direction": direction,
+            "move_pts": round(abs(move), 1),
+            "duration_minutes": len(window),
+        }
+    return {"trending": False, "direction": None, "move_pts": 0, "duration_minutes": 0}
+
+
+# =============================================================================
+# EXPIRY THETA NORMALISATION
+# =============================================================================
+
+def normalise_straddle_momentum_for_theta(straddle_momentum, days_to_expiry):
+    """
+    On expiry days, straddle decays naturally through theta.
+    Raw momentum of -3% might just be normal decay, not IV compression.
+    Subtract expected theta decay so only *excess* compression is counted.
+
+    Returns adjusted momentum (less negative on expiry days).
+    """
+    from config import EXPIRY_THETA_NORM_DTE, THETA_DECAY_RATE_PER_5M
+    if straddle_momentum is None:
+        return straddle_momentum
+    if days_to_expiry not in EXPIRY_THETA_NORM_DTE:
+        return straddle_momentum
+    # Subtract expected decay — if expected is -1.5% and actual is -3%,
+    # the excess compression is only -1.5%
+    return straddle_momentum - THETA_DECAY_RATE_PER_5M
+
+
+# =============================================================================
+# THROTTLE HELPER
+# =============================================================================
+
+def should_compute(signal_name):
+    """
+    Returns True if this signal should be recomputed this tick.
+    Uses THROTTLE_INTERVALS from config. Signals not in the dict
+    are computed every tick.
+    """
+    from config import THROTTLE_INTERVALS
+    interval = THROTTLE_INTERVALS.get(signal_name)
+    if interval is None:
+        return True  # compute every tick
+    tick = state.tick_counter
+    cached = state.throttle_cache.get(signal_name)
+    if cached is not None and (tick - cached["tick"]) < interval:
+        return False
+    return True
+
+
+def cache_result(signal_name, result):
+    """Store a computed result in the throttle cache."""
+    state.throttle_cache[signal_name] = {
+        "tick": state.tick_counter,
+        "result": result,
+    }
+
+
+def get_cached(signal_name, default=None):
+    """Retrieve last cached result for a signal."""
+    cached = state.throttle_cache.get(signal_name)
+    if cached is not None:
+        return cached["result"]
+    return default
+
+
+# =============================================================================
 # TRAP CLASSIFIER
 # =============================================================================
 
@@ -31,7 +151,19 @@ def classify_option_trap(spot, prev_spot, call_wall, put_wall, gamma,
     Classifies market condition into BULL TRAP / BEAR TRAP / PIN TRAP / NONE.
     Gamma acts as a score multiplier — the causal engine behind all traps.
     Negative gamma suppresses confidence by 60% (trap = breakout in neg gamma).
+
+    FIXES (v2):
+      - Wall retreat detection: if the wall has been retreating (moving in
+        direction of price), trap confidence is halved — a retreating wall
+        is NOT a trap, it's institutions adjusting.
+      - Trend detection: if spot has moved ≥ 1× expected move in one direction
+        over 30 minutes, trap confidence is suppressed — the market is trending,
+        not trapping.
+      - Theta normalisation: on expiry days, straddle compression is adjusted
+        for expected theta decay so normal time decay doesn't inflate trap scores.
     """
+    from config import (WALL_RETREAT_TRAP_PEN, TREND_TRAP_SUPPRESS)
+
     expected_move = straddle / 2
     result = {
         "type": "NONE", "confidence": 0,
@@ -49,7 +181,9 @@ def classify_option_trap(spot, prev_spot, call_wall, put_wall, gamma,
     put_writing   = "Put Writing"   in oi_signal
     put_covering  = "Put Covering"  in oi_signal or "Put Unwinding" in oi_signal
 
-    iv_compressing = straddle_momentum is not None and straddle_momentum < -0.5
+    # FIX: normalise straddle momentum for theta on expiry days
+    adj_momentum = normalise_straddle_momentum_for_theta(straddle_momentum, days_to_expiry)
+    iv_compressing = adj_momentum is not None and adj_momentum < -0.5
 
     if   gamma > 0:  gamma_mult = 1.5
     elif gamma == 0: gamma_mult = 1.0
@@ -71,7 +205,7 @@ def classify_option_trap(spot, prev_spot, call_wall, put_wall, gamma,
         bull_reason.append("Put writers covering — no fear below")
     if iv_compressing:
         bull_score += 15
-        bull_reason.append(f"Straddle compressing {straddle_momentum:.1f}% — no energy behind rally")
+        bull_reason.append(f"Straddle compressing {adj_momentum:.1f}% (theta-adj) — no energy behind rally")
     if abs(spot - gamma_wall) < 50:
         bull_score += 10
         bull_reason.append(f"Gamma Wall {gamma_wall} nearby — dealer resistance concentrated here")
@@ -93,7 +227,7 @@ def classify_option_trap(spot, prev_spot, call_wall, put_wall, gamma,
         bear_reason.append("Call writers covering — no fear above")
     if iv_compressing:
         bear_score += 15
-        bear_reason.append(f"Straddle compressing {straddle_momentum:.1f}% — no energy behind selloff")
+        bear_reason.append(f"Straddle compressing {adj_momentum:.1f}% (theta-adj) — no energy behind selloff")
     if abs(spot - gamma_wall) < 50:
         bear_score += 10
         bear_reason.append(f"Gamma Wall {gamma_wall} nearby — dealer support concentrated here")
@@ -124,6 +258,39 @@ def classify_option_trap(spot, prev_spot, call_wall, put_wall, gamma,
 
     if gamma < 0:
         best_score = int(best_score * 0.4)
+
+    # FIX: Wall retreat penalty — if the wall has been retreating in the
+    # direction of price, this is NOT a trap. Halve confidence.
+    if best_type == "BULL TRAP":
+        retreating, retreat_count = detect_wall_retreat("call")
+        if retreating:
+            best_score = int(best_score * WALL_RETREAT_TRAP_PEN)
+            if best_type == "BULL TRAP":
+                bull_reason.append(
+                    f"⚠ Call wall retreated {retreat_count}× — resistance dissolving, trap weakened"
+                )
+    elif best_type == "BEAR TRAP":
+        retreating, retreat_count = detect_wall_retreat("put")
+        if retreating:
+            best_score = int(best_score * WALL_RETREAT_TRAP_PEN)
+            bear_reason.append(
+                f"⚠ Put wall retreated {retreat_count}× — support dissolving, trap weakened"
+            )
+
+    # FIX: Trend suppression — if we're in a persistent trend, trap signals
+    # are almost certainly wrong. Suppress heavily.
+    trend = detect_persistent_trend(spot, expected_move)
+    if trend["trending"]:
+        trend_dir = trend["direction"]
+        # Bull trap in an uptrend = wrong signal. Bear trap in a downtrend = wrong.
+        if (best_type == "BULL TRAP" and trend_dir == "UP") or \
+           (best_type == "BEAR TRAP" and trend_dir == "DOWN"):
+            best_score = int(best_score * TREND_TRAP_SUPPRESS)
+            reason_list = bull_reason if best_type == "BULL TRAP" else bear_reason
+            reason_list.append(
+                f"⚠ TREND OVERRIDE: {trend_dir} trend {trend['move_pts']}pts "
+                f"over {trend['duration_minutes']}min — trap suppressed"
+            )
 
     if best_score < 40:
         return result
