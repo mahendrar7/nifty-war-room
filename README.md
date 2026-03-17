@@ -80,18 +80,6 @@
 #      Similarly HTL_WALL_EXIT_PTS = 25 may be too tight on high-vol days —
 #      add a volatility scalar based on straddle size relative to 30-day avg.
 #
-#   3. REFACTOR INTO MODULES
-#      File is ~3500 lines and growing. Split into:
-#        war_room.py          — main loop, dashboard, hotkeys (~300 lines)
-#        gamma_engine.py      — BS gamma, IV solver, GEX, flip level
-#        oi_signals.py        — walls, velocity, PCR, imbalance, momentum
-#        detectors.py         — trap, vacuum, wall break, flip breakout,
-#                               liq accel, move probability
-#        position_sizing.py   — regime risk, expiry params, suggest_trade,
-#                               hold_the_line
-#        state.py             — MarketState, RegimeTracker, restore_from_csv
-#      Each module independently testable. war_room.py becomes an orchestrator.
-#
 #   4. MOVE PROBABILITY BACKTESTING
 #      Log move_prob score and direction every candle alongside actual next-candle
 #      move. After 2-3 weeks: calibrate whether 60% prob actually correlates with
@@ -103,5 +91,11 @@
 #      average RR. Feed back into compute_position_size() as a multiplier so
 #      high-accuracy paths automatically get more size and underperforming paths
 #      get throttled without manual tuning.
+#
+#   6. Add a session_cumulative_move feature — just spot_close - spot_open_of_day 
+#      at each candle. Right now the model has no concept of "we've been going up 
+#      all day." Every candle looks the same to it whether it's the first move of 
+#      the day or the 15th candle in a relentless trend. That single feature would 
+#      probably do more for accuracy than any amount of hyperparameter tuning.
 #
 # =============================================================================
