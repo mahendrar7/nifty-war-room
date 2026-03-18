@@ -1109,14 +1109,27 @@ def _register_trade_entry():
         def _manual():
             tty = None
             try:
-                # Always read from /dev/tty — immune to stdin EOF
-                tty = open("/dev/tty", "r")
+                try:
+                    tty = open("/dev/tty", "r")
+                    read_line = tty.readline
+                except OSError:
+                    tty = None
+                    read_line = sys.stdin.readline
+
+                def prompt(msg):
+                    sys.stdout.write(msg)
+                    sys.stdout.flush()
+                    line = read_line()
+                    if not line:
+                        raise EOFError("stdin closed")
+                    return line.strip()
+
                 print(f"\n{'─' * 50}")
                 print(f"  {Fore.YELLOW}No suggestion cached.{Style.RESET_ALL} Enter details:")
-                strike      = int(tty.readline().rstrip() or _prompt_tty(tty, "  Strike: "))
-                opt_type    = _prompt_tty(tty, "  CE/PE: ").upper()
-                entry_price = float(_prompt_tty(tty, "  Entry price: "))
-                lots        = int(_prompt_tty(tty, "  Lots: "))
+                strike      = int(prompt("  Strike: "))
+                opt_type    = prompt("  CE/PE: ").upper()
+                entry_price = float(prompt("  Entry price: "))
+                lots        = int(prompt("  Lots: "))
                 state.active_trade = {
                     "strike": strike, "option_type": opt_type,
                     "entry_price": entry_price, "entry_time": now,
@@ -1127,7 +1140,7 @@ def _register_trade_entry():
                 send_telegram_message(
                     f"🟢 MANUAL ENTRY: {strike} {opt_type} @ ₹{entry_price:.0f} | ×{lots} | {now}"
                 )
-            except (EOFError, ValueError, OSError) as e:
+            except (EOFError, ValueError) as e:
                 print(f"  ⚠ Entry cancelled: {e}")
             finally:
                 if tty:
