@@ -130,12 +130,12 @@ state = MarketState()
 # =============================================================================
 # RESTORE STATE FROM CSV
 # =============================================================================
-def restore_state_from_csv(debug_mode=False):
-    if not os.path.exists(CSV_FILE):
+def restore_state_from_csv(debug_mode=False, csv_file=CSV_FILE):
+    if not os.path.exists(csv_file):
         return
 
     try:
-        with open(CSV_FILE, "r") as f:
+        with open(csv_file, "r") as f:
             lines = list(deque(f, 2000))
 
         df = pd.read_csv(

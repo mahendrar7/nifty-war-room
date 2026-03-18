@@ -108,6 +108,7 @@
 
 import os
 import re
+import sys
 import csv
 import time
 import unicodedata
@@ -117,9 +118,19 @@ from colorama import Fore, Style, init
 from notifier import send_telegram_message
 
 from config import (
-    CSV_FILE, MARKET_OPEN, MARKET_CLOSE,
-    LOT_SIZE, GAMMA_FLIP_DANGER_ZONE,
+    MARKET_OPEN, MARKET_CLOSE, INSTRUMENT_PROFILES,
 )
+
+# ── Instrument selection via CLI arg ─────────────────────────────────────────
+_instrument_arg = sys.argv[1].upper() if len(sys.argv) > 1 else "NIFTY"
+if _instrument_arg not in INSTRUMENT_PROFILES:
+    print(f"Unknown instrument '{_instrument_arg}'. Choose from: {list(INSTRUMENT_PROFILES)}")
+    sys.exit(1)
+PROFILE = INSTRUMENT_PROFILES[_instrument_arg]
+CSV_FILE              = PROFILE["csv_file"]
+LOT_SIZE              = PROFILE["lot_size"]
+GAMMA_FLIP_DANGER_ZONE = PROFILE["gamma_flip_danger_zone"]
+print(f"▶ Running for {_instrument_arg}")
 from state import state, restore_state_from_csv
 from market_data import (
     load_instruments, get_spot, get_nearest_expiry,
@@ -212,9 +223,9 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
 
     straddle = compute_straddle(df, atm)
     momentum_data = update_straddle(straddle)
-    gamma = compute_gamma_pressure(df, spot, expiry)
+    gamma = compute_gamma_pressure(df, spot, expiry, lot_size=PROFILE["lot_size"], sigma=PROFILE["gamma_sigma"])
     gamma_flip = detect_gamma_flip(gamma, state.previous_gamma)
-    gamma_wall = compute_gamma_wall(df, spot, expiry)
+    gamma_wall = compute_gamma_wall(df, spot, expiry, lot_size=PROFILE["lot_size"], sigma=PROFILE["gamma_sigma"])
 
     # Throttled signals — use cache if not due for recompute
     if should_compute("gravity"):
@@ -281,7 +292,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
     else:
         magnet_strike, magnet_prob = get_cached("magnet", (atm, 50))
 
-    flip_level = find_gamma_flip_level(df, spot)
+    flip_level = find_gamma_flip_level(df, spot, sigma=PROFILE["gamma_sigma"])
     squeeze = detect_gamma_squeeze(gamma, momentum_data, oi_signal)
 
     if should_compute("strike_war"):
@@ -899,7 +910,7 @@ def archive_daily_log():
         return
 
     date_str = datetime.now().strftime("%d%m%Y")
-    archived = f"data/options_log_1min_{date_str}.csv"
+    archived = f"data/options_log_1min_{_instrument_arg.lower()}_{date_str}.csv"
 
     if os.path.exists(archived):
         print(f"Archive already exists: {archived} — skipping.")
@@ -914,12 +925,15 @@ def archive_daily_log():
 # MAIN LOOP
 # =============================================================================
 def run_logger():
-    instruments = load_instruments()
+    instruments = load_instruments(
+        exchange=PROFILE["exchange"],
+        cache_file=PROFILE["cache_file"],
+    )
     consecutive_errors = 0
     MAX_ERRORS = 5
     archived_today = False
 
-    ml = MLSignal() if ML_AVAILABLE else None
+    ml = MLSignal(instrument=_instrument_arg.lower()) if ML_AVAILABLE else None
 
     print("✅ Options Intelligence Terminal Started")
 
@@ -953,10 +967,13 @@ def run_logger():
         try:
             print(f"\nSnapshot: {now.strftime('%H:%M:%S')}")
 
-            expiry = get_nearest_expiry(instruments)
-            spot = get_spot()
-            atm, strikes = get_strikes(spot)
-            symbols = build_symbol_list(instruments, expiry, strikes)
+            expiry = get_nearest_expiry(instruments, name=PROFILE["name"])
+            spot = get_spot(spot_symbol=PROFILE["spot_symbol"])
+            atm, strikes = get_strikes(spot, strike_step=PROFILE["strike_step"])
+            symbols = build_symbol_list(
+                instruments, expiry, strikes,
+                name=PROFILE["name"], exchange=PROFILE["exchange"],
+            )
             rows = fetch_quotes(symbols)
             df = build_option_dataframe(rows, spot)
             momentum_strikes = detect_momentum(df, state.previous_snapshot)
@@ -1186,5 +1203,5 @@ def _register_trade_exit():
 if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
     start_hotkey_listener()
-    restore_state_from_csv()
+    restore_state_from_csv(csv_file=CSV_FILE)
     run_logger()

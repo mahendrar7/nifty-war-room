@@ -134,19 +134,19 @@ def _gaussian_weight(strikes, spot, sigma=GAMMA_SIGMA):
     return np.exp(-0.5 * ((strikes - spot) / sigma) ** 2)
 
 
-def compute_gamma_pressure(df, spot, expiry=None):
+def compute_gamma_pressure(df, spot, expiry=None, lot_size=LOT_SIZE, sigma=GAMMA_SIGMA):
     """
     Dealer GEX = Σ[(call_gamma - put_gamma) × OI × LotSize × Spot² × GaussWeight]
     Positive → dealers long gamma → pin. Negative → dealers short → trend.
     """
     df = df.copy()
-    df["gauss"] = _gaussian_weight(df["strike"].values, spot)
+    df["gauss"] = _gaussian_weight(df["strike"].values, spot, sigma=sigma)
 
     if "call_gamma_bs" in df.columns and "put_gamma_bs" in df.columns:
         df["gex"] = (
             (df["call_gamma_bs"] * df["call_oi"] -
              df["put_gamma_bs"]  * df["put_oi"])
-            * LOT_SIZE * (spot ** 2) * df["gauss"]
+            * lot_size * (spot ** 2) * df["gauss"]
         )
     else:
         df["gex"] = (df["call_oi"] - df["put_oi"]) * df["gauss"]
@@ -154,16 +154,16 @@ def compute_gamma_pressure(df, spot, expiry=None):
     return df["gex"].sum()
 
 
-def compute_gamma_wall(df, spot, expiry=None):
+def compute_gamma_wall(df, spot, expiry=None, lot_size=LOT_SIZE, sigma=GAMMA_SIGMA):
     """Strike with highest total GEX — where dealer hedging is most concentrated."""
     df = df.copy()
-    df["gauss"] = _gaussian_weight(df["strike"].values, spot)
+    df["gauss"] = _gaussian_weight(df["strike"].values, spot, sigma=sigma)
 
     if "call_gamma_bs" in df.columns and "put_gamma_bs" in df.columns:
         df["total_gex"] = (
             (df["call_gamma_bs"] * df["call_oi"] +
              df["put_gamma_bs"]  * df["put_oi"])
-            * LOT_SIZE * (spot ** 2) * df["gauss"]
+            * lot_size * (spot ** 2) * df["gauss"]
         )
     else:
         df["total_gex"] = (df["call_oi"] + df["put_oi"]) * df["gauss"]
@@ -185,7 +185,7 @@ def detect_gamma_flip(current_gamma, previous_gamma):
     return None
 
 
-def find_gamma_flip_level(df, spot, scan_range=500, num_points=200):
+def find_gamma_flip_level(df, spot, scan_range=500, num_points=200, sigma=GAMMA_SIGMA):
     """
     Scan ±scan_range pts around spot to find where dealer GEX crosses zero.
     Uses fast OI-proxy — ~1ms per tick. Returns level or None.
@@ -194,7 +194,7 @@ def find_gamma_flip_level(df, spot, scan_range=500, num_points=200):
     gamma_values = []
 
     for p in test_prices:
-        weights = _gaussian_weight(df["strike"].values, p)
+        weights = _gaussian_weight(df["strike"].values, p, sigma=sigma)
         gex     = ((df["call_oi"] - df["put_oi"]) * weights).sum()
         gamma_values.append(gex)
 

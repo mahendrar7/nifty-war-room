@@ -20,6 +20,34 @@ RISK_FREE_RATE  = 0.065    # RBI repo rate — update when RBI changes (last: 6.
 GAMMA_SIGMA     = 120      # Gaussian kernel width for gamma weighting
 
 # -----------------------------
+# INSTRUMENT PROFILES
+# -----------------------------
+INSTRUMENT_PROFILES = {
+    "NIFTY": {
+        "spot_symbol":          "NSE:NIFTY 50",
+        "exchange":             "NFO",
+        "name":                 "NIFTY",
+        "strike_step":          50,
+        "lot_size":             65,
+        "gamma_sigma":          120,
+        "gamma_flip_danger_zone": 20,
+        "csv_file":             "data/options_log_1min_nifty.csv",
+        "cache_file":           "instrument_cache_nifty.pkl",
+    },
+    "SENSEX": {
+        "spot_symbol":          "BSE:SENSEX",
+        "exchange":             "BFO",
+        "name":                 "SENSEX",
+        "strike_step":          100,
+        "lot_size":             20,
+        "gamma_sigma":          300,
+        "gamma_flip_danger_zone": 50,
+        "csv_file":             "data/options_log_1min_sensex.csv",
+        "cache_file":           "instrument_cache_sensex.pkl",
+    },
+}
+
+# -----------------------------
 # POSITION SIZING
 # -----------------------------
 ACCOUNT_SIZE     = 100000   # change to your capital

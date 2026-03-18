@@ -14,50 +14,50 @@ from kite_interface import get_kite_client
 kite = get_kite_client()
 
 
-def load_instruments():
+def load_instruments(exchange="NFO", cache_file=CACHE_FILE):
     today_str = datetime.now().date().isoformat()
 
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "rb") as f:
+    if os.path.exists(cache_file):
+        with open(cache_file, "rb") as f:
             cached = pickle.load(f)
         if isinstance(cached, dict) and cached.get("date") == today_str:
             return cached["instruments"]
 
-    instruments = kite.instruments("NFO")
+    instruments = kite.instruments(exchange)
 
-    with open(CACHE_FILE, "wb") as f:
+    with open(cache_file, "wb") as f:
         pickle.dump({"date": today_str, "instruments": instruments}, f)
 
     return instruments
 
 
-def get_spot():
-    quote = kite.quote("NSE:NIFTY 50")
-    return quote["NSE:NIFTY 50"]["last_price"]
+def get_spot(spot_symbol="NSE:NIFTY 50"):
+    quote = kite.quote(spot_symbol)
+    return quote[spot_symbol]["last_price"]
 
 
-def get_nearest_expiry(instruments):
+def get_nearest_expiry(instruments, name="NIFTY"):
     today = datetime.now().date()
     expiries = sorted(set(
         i["expiry"]
         for i in instruments
-        if i["name"] == "NIFTY"
+        if i["name"] == name
         and i["instrument_type"] == "CE"
         and i["expiry"] >= today
     ))
     return expiries[0]
 
 
-def get_strikes(spot):
-    atm     = round(spot / STRIKE_STEP) * STRIKE_STEP
-    strikes = [atm + i * STRIKE_STEP for i in range(-NUM_STRIKES, NUM_STRIKES + 1)]
+def get_strikes(spot, strike_step=STRIKE_STEP):
+    atm     = round(spot / strike_step) * strike_step
+    strikes = [atm + i * strike_step for i in range(-NUM_STRIKES, NUM_STRIKES + 1)]
     return atm, strikes
 
 
-def build_symbol_list(instruments, expiry, strikes):
+def build_symbol_list(instruments, expiry, strikes, name="NIFTY", exchange="NFO"):
     symbols = []
     for ins in instruments:
-        if ins["name"] != "NIFTY":
+        if ins["name"] != name:
             continue
         if ins["expiry"] != expiry:
             continue
@@ -65,7 +65,7 @@ def build_symbol_list(instruments, expiry, strikes):
             continue
         if ins["instrument_type"] not in ["CE", "PE"]:
             continue
-        symbols.append(f"NFO:{ins['tradingsymbol']}")
+        symbols.append(f"{exchange}:{ins['tradingsymbol']}")
     return symbols
 
 

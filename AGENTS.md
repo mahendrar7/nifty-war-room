@@ -37,7 +37,7 @@
 | **ml_engine.py** | XGBoost 15-min direction predictor, trains on 1-min CSV, persistence | `MLEngine` class, `predict_latest()` |
 | **notifier.py** | Telegram sender (synchronous) | `send_telegram_message()` |
 | **kite_interface.py** | Kite auth (OAuth callback handler on port 8080), token refresh, client singleton | `get_kite_client()` |
-| **nifty_war_room.py** | Main loop (1-min ticks), dashboard printer, trade hotkeys, orchestrator | Entry point |
+| **options_war_room.py** | Main loop (1-min ticks), dashboard printer, trade hotkeys, orchestrator | Entry point |
 
 ---
 
@@ -46,10 +46,10 @@
 ### Starting the System
 ```bash
 # First run — generates Kite auth token via browser callback
-python nifty_war_room.py
+python options_war_room.py
 
 # Subsequent runs — loads token from access_token.txt
-python nifty_war_room.py
+python options_war_room.py
 ```
 
 ### Data & ML Pipeline
@@ -83,7 +83,7 @@ state.last_suggestion = {...}  # All modules mutate this
 state.gamma_flip_alerted = False  # Alert flag to prevent spam
 ```
 - **Why**: Avoids parameter threading through 10 function calls
-- **Pattern**: Update flags after sending Telegram (see `nifty_war_room.py` main loop)
+- **Pattern**: Update flags after sending Telegram (see `options_war_room.py` main loop)
 
 ### 2. Regime Confirmation (3-Candle Hysteresis)
 ```python
@@ -181,7 +181,7 @@ call_wall = df.loc[df["call_cluster"].idxmax(), "strike"]
 ### Adding a New Detector
 1. Write detector logic in `detectors.py` (returns dict with `{"name": "...", "confidence": 0–100, ...}`)
 2. Add formatter function (e.g., `format_new_detector()`)
-3. Call in `nifty_war_room.py` main loop
+3. Call in `options_war_room.py` main loop
 4. Add to Move Probability Meter (MPM) weights in `config.py` if structural
 
 ### Tuning Risk Parameters
@@ -210,7 +210,7 @@ call_wall = df.loc[df["call_cluster"].idxmax(), "strike"]
 |-------|------|---------|
 | 1 | **config.py** | Understand the 40+ tunable parameters & regimes |
 | 2 | **state.py** | Grasp singleton state management + RegimeTracker |
-| 3 | **nifty_war_room.py** | See how modules orchestrate in 1-min loop |
+| 3 | **options_war_room.py** | See how modules orchestrate in 1-min loop |
 | 4 | **gamma_engine.py** | Study BS gamma + IV solver + flip level |
 | 5 | **oi_signals.py** | Learn wall detection + bias inference |
 | 6 | **detectors.py** | See pattern detectors (trap, vacuum, accel, etc.) |

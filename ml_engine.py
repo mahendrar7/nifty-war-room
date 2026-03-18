@@ -406,7 +406,15 @@ def add_lag_features(df, lags=3):
 # =============================================================================
 class MLEngine:
 
-    def __init__(self):
+    def __init__(self, instrument="nifty"):
+        prefix = instrument.lower()
+        self.model_file    = f"data/ml_model_{prefix}.joblib"
+        self.model_xgb     = f"data/ml_model_{prefix}.ubj"
+        self.dataset_file  = f"data/ml_dataset_{prefix}.csv"
+        self.threshold_file = f"data/ml_threshold_{prefix}.txt"
+        self.csv_glob      = f"data/options_log_1min_{prefix}_????????.csv"
+        self.live_csv      = f"data/options_log_1min_{prefix}.csv"
+        self.feedback_file = f"data/ml_feedback_{prefix}.csv"
         self.model      = None
         self.features   = None
         self.x_points   = DEFAULT_X
@@ -440,11 +448,11 @@ class MLEngine:
 
         # Save for inspection
         os.makedirs("data", exist_ok=True)
-        candles.to_csv(DATASET_FILE)
-        print(f"  Dataset saved → {DATASET_FILE}")
+        candles.to_csv(self.dataset_file)
+        print(f"  Dataset saved → {self.dataset_file}")
 
         # Save threshold for use at prediction time
-        with open(THRESHOLD_FILE, "w") as f:
+        with open(self.threshold_file, "w") as f:
             f.write(str(self.x_points))
 
         return candles
@@ -545,7 +553,7 @@ class MLEngine:
 
         # Save model
         # NEW — save XGBoost natively, metadata separately
-        self.model.save_model(MODEL_XGB_FILE)  # native format, no pickle, no warning
+        self.model.save_model(self.model_xgb)  # native format, no pickle, no warning
         joblib.dump({
             "features": self.features,
             "x_points": self.x_points,
@@ -553,9 +561,9 @@ class MLEngine:
             "inv_map": {v: k for k, v in label_map.items()},
             "trained_at": datetime.now().isoformat(),
             "n_samples": n_samples,
-        }, MODEL_FILE)
+        }, self.model_file)
 
-        print(f"  ✅ Model saved → {MODEL_XGB_FILE} + {MODEL_FILE}")
+        print(f"  ✅ Model saved → {self.model_xgb} + {self.model_file}")
         return cv_results
 
     def _build_model(self, n_samples):
@@ -624,16 +632,16 @@ class MLEngine:
 
     # ── Load saved model ──────────────────────────────────────────────────────
     def load(self):
-        if not os.path.exists(MODEL_XGB_FILE) or not os.path.exists(MODEL_FILE):
+        if not os.path.exists(self.model_xgb) or not os.path.exists(self.model_file):
             raise FileNotFoundError(f"No saved model. Train first.")
         # Load metadata (no XGBoost model inside — no pickle warning)
-        saved = joblib.load(MODEL_FILE)
+        saved = joblib.load(self.model_file)
         self.features = saved["features"]
         self.x_points = saved["x_points"]
         self._inv_map = saved["inv_map"]
         # Load XGBoost model natively
         self.model = xgb.XGBClassifier()
-        self.model.load_model(MODEL_XGB_FILE)
+        self.model.load_model(self.model_xgb)
         print(f"  ✅ Model loaded (trained at {saved['trained_at']} on {saved['n_samples']} samples)")
 
     # ── Predict on latest candle ──────────────────────────────────────────────
@@ -752,12 +760,12 @@ class MLEngine:
         """
         print(f"\n🔄 Rolling retrain on last {lookback_days} days...")
 
-        archived = sorted(glob.glob("data/options_log_1min_????????.csv"))
+        archived = sorted(glob.glob(self.csv_glob))
         recent   = archived[-lookback_days:]
 
         # Include today's live file if it exists
-        if os.path.exists("data/options_log_1min.csv"):
-            recent.append("data/options_log_1min.csv")
+        if os.path.exists(self.live_csv):
+            recent.append(self.live_csv)
 
         if not recent:
             print("  No historical files found. Skipping retrain.")
@@ -767,10 +775,9 @@ class MLEngine:
         self.build_dataset(recent)
 
         # Apply feedback weights if ledger exists
-        feedback_file = FEEDBACK_FILE
-        if os.path.exists(feedback_file) and self.dataset is not None:
+        if os.path.exists(self.feedback_file) and self.dataset is not None:
             try:
-                ledger = FeedbackLedger(feedback_file)
+                ledger = FeedbackLedger(self.feedback_file)
                 ts     = self.dataset.index.tolist()
                 dates  = self.dataset.get("trading_date", pd.Series([""] * len(ts))).tolist()
                 fb_weights = ledger.get_sample_weights(ts, dates)
@@ -1035,7 +1042,7 @@ class FeedbackLedger:
         return self._suggest_threshold()
 
 # =============================================================================
-# WAR ROOM INTEGRATION — drop-in hook for nifty_war_room.py
+# WAR ROOM INTEGRATION — drop-in hook for options_war_room.py
 # =============================================================================
 class MLSignal:
     """
@@ -1053,14 +1060,14 @@ class MLSignal:
             print(ml_result)
     """
 
-    def __init__(self, candle_minutes=CANDLE_MINUTES):
-        self.engine         = MLEngine()
+    def __init__(self, candle_minutes=CANDLE_MINUTES, instrument="nifty"):
+        self.engine         = MLEngine(instrument=instrument)
         self.candle_minutes = candle_minutes
         self.current_candle = None
         self.prev_snapshot  = None
         self.prev_gamma     = None
         self.prev_straddle  = None
-        self.ledger         = FeedbackLedger()   # outcome tracker
+        self.ledger         = FeedbackLedger(self.engine.feedback_file)   # outcome tracker
 
         # Try loading existing model
         try:
