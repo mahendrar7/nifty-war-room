@@ -120,7 +120,7 @@ class MarketState:
         self.spot_history.clear()
         self.throttle_cache.clear()
         self.tick_counter        = 0
-        self.ml_consecutive_wrong = 0
+        # ml_consecutive_wrong intentionally not reset — ML reliability persists across sessions
 
 
 # Singleton — all modules import this instance

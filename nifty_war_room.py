@@ -907,7 +907,7 @@ def archive_daily_log():
 
     os.rename(CSV_FILE, archived)
     print(f"📁 Log archived → {archived}")
-    send_telegram_message(f"📁 Day complete. Log saved as {archived}")
+    send_telegram_message(f"📁 Day complete. Log saved as `{archived}`")
 
 
 # =============================================================================
