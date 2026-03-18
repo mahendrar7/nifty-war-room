@@ -404,14 +404,17 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
     # ── Gamma flip danger zone Telegram ──────────────────────────────────
     if flip_level:
         dist = abs(spot - flip_level)
-        if dist <= GAMMA_FLIP_DANGER_ZONE and not state.gamma_flip_alerted:
+        prev_dist = state.previous_flip_distance
+        just_entered = (prev_dist is None or prev_dist > GAMMA_FLIP_DANGER_ZONE) and dist <= GAMMA_FLIP_DANGER_ZONE
+        if just_entered and not state.flip_approach_alerted:
             send_telegram_message(
-                f"⚡ GAMMA FLIP ZONE: Spot {spot} within {GAMMA_FLIP_DANGER_ZONE}pts "
-                f"of flip level {flip_level} — dealer regime may change!"
+                f"⚡ GAMMA FLIP ZONE: Spot {spot} approaching flip level {flip_level} "
+                f"({dist:.0f}pts away) — dealer regime may change!"
             )
-            state.gamma_flip_alerted = True
-        elif dist > GAMMA_FLIP_DANGER_ZONE:
-            state.gamma_flip_alerted = False
+            state.flip_approach_alerted = True
+        elif dist > GAMMA_FLIP_DANGER_ZONE * 2:
+            state.flip_approach_alerted = False
+        state.previous_flip_distance = dist
 
     # ==========================================================================
     # PRINT — minimal actionable layout
@@ -547,7 +550,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
             )
             state.gamma_flip_alerted = True
     else:
-        state.gamma_flip_alerted = False
+        state.gamma_flip_alerted = False  # reset only flip breakout flag, not approach flag
 
     # Trap — only >= 60
     if trap["confidence"] >= 60:

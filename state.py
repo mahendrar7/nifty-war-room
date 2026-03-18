@@ -72,7 +72,9 @@ class MarketState:
         self.oi_velocity_history = deque(maxlen=30)
         self.regime_tracker      = RegimeTracker(min_confirm=3)
         self.last_ml_result      = None
-        self.gamma_flip_alerted  = False
+        self.gamma_flip_alerted  = False   # used by flip breakout detector
+        self.flip_approach_alerted  = False # used by danger zone approach alert
+        self.previous_flip_distance = None  # tracks if spot is closing in
         self.trap_alerted        = None
         self.vacuum_alerted      = None
         self.liq_accel_alerted   = None
@@ -105,6 +107,8 @@ class MarketState:
         self.oi_velocity_history.clear()
         self.last_ml_result      = None
         self.gamma_flip_alerted  = False
+        self.flip_approach_alerted  = False
+        self.previous_flip_distance = None
         self.trap_alerted        = None
         self.vacuum_alerted      = None
         self.liq_accel_alerted   = None
