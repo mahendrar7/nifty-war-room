@@ -898,6 +898,49 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         print(f"Best call: {best_call} CE  │  Best put: {best_put} PE")
         print_divider(char="-")
 
+    # ── Persist all derived signals for post-session debrief ──────────────
+    _ml_conf = None
+    if state.last_ml_result is not None and state.last_ml_result["signal"] != 0:
+        _ml_conf = round(state.last_ml_result["confidence"], 3)
+
+    save_signals(
+        spot=spot, atm=atm, gamma=gamma, straddle=straddle,
+        bias=bias, confidence=confidence, regime=regime, action=action,
+        call_wall=call_wall, put_wall=put_wall,
+        flip_level=flip_level, gravity=gravity, pcr_val=pcr_val,
+        momentum_5m=momentum_5m,
+        momentum_15m=momentum_data["momentum_15m"] if momentum_data and momentum_data.get("momentum_15m") is not None else None,
+        trap_type=trap["type"], trap_conf=trap_prob,
+        velocity=velocity,
+        move_prob_score=move_prob["probability"],
+        move_prob_dir=move_prob["direction"],
+        move_prob_conv=move_prob["conviction"],
+        vacuum_status=vacuum["status"] if vacuum else "NONE",
+        vacuum_dir=vacuum["direction"] if vacuum else None,
+        vacuum_score=vacuum["score"] if vacuum else 0,
+        flip_breakout_detected=flip_breakout["detected"] if flip_breakout else False,
+        flip_breakout_dir=flip_breakout["direction"] if flip_breakout and flip_breakout["detected"] else None,
+        liq_accel_detected=liq_accel["detected"] if liq_accel else False,
+        liq_accel_dir=liq_accel["direction"] if liq_accel and liq_accel["detected"] else None,
+        liq_accel_score=liq_accel["score"] if liq_accel else 0,
+        wall_break_detected=wall_break_vac["detected"] if wall_break_vac else False,
+        wall_break_dir=wall_break_vac["direction"] if wall_break_vac and wall_break_vac["detected"] else None,
+        squeeze=squeeze,
+        trend_dir=trend["direction"] if trend and trend["trending"] else None,
+        trend_pts=trend["move_pts"] if trend else 0,
+        trend_duration=trend["duration_minutes"] if trend else 0,
+        trade_suggested=trade is not None,
+        trade_strike=trade["strike"] if trade else None,
+        trade_type=trade["trade_type"] if trade else None,
+        trade_dir=trade["direction"] if trade else None,
+        htl_verdict=htl["verdict"] if htl else None,
+        htl_score=htl["hold_score"] if htl else None,
+        htl_source=htl_source,
+        ml_signal=ml_signal,
+        ml_confidence=_ml_conf,
+        days_to_expiry=days_to_expiry,
+    )
+
     return gamma, straddle, bias, trap_prob, count
 
 
@@ -958,6 +1001,73 @@ def wait_until_next_minute():
 
 def is_market_open():
     return MARKET_OPEN <= datetime.now().time() <= MARKET_CLOSE
+
+
+# =============================================================================
+# SIGNALS LOG — one row per minute with all derived signals for debrief
+# =============================================================================
+_SIGNALS_CSV = None   # set at first call based on instrument + date
+
+def save_signals(spot, atm, gamma, straddle, bias, confidence, regime, action,
+                 call_wall, put_wall, flip_level, gravity, pcr_val,
+                 momentum_5m, momentum_15m, trap_type, trap_conf,
+                 velocity, move_prob_score, move_prob_dir, move_prob_conv,
+                 vacuum_status, vacuum_dir, vacuum_score,
+                 flip_breakout_detected, flip_breakout_dir,
+                 liq_accel_detected, liq_accel_dir, liq_accel_score,
+                 wall_break_detected, wall_break_dir,
+                 squeeze, trend_dir, trend_pts, trend_duration,
+                 trade_suggested, trade_strike, trade_type, trade_dir,
+                 htl_verdict, htl_score, htl_source,
+                 ml_signal, ml_confidence, days_to_expiry):
+    """
+    Append one row of derived signals to the daily signals log.
+    Separate from the raw options CSV — this is for post-session analysis.
+    """
+    global _SIGNALS_CSV
+    now = datetime.now()
+    date_str = now.strftime("%d%m%Y")
+
+    if _SIGNALS_CSV is None:
+        _SIGNALS_CSV = f"data/signals_log_{_instrument_arg.lower()}_{date_str}.csv"
+
+    file_exists = os.path.exists(_SIGNALS_CSV)
+
+    with open(_SIGNALS_CSV, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow([
+                "timestamp", "spot", "atm", "gamma_pressure", "straddle",
+                "bias", "confidence", "regime", "action",
+                "call_wall", "put_wall", "flip_level", "gravity", "pcr",
+                "straddle_mom_5m", "straddle_mom_15m",
+                "trap_type", "trap_confidence",
+                "oi_velocity", "move_prob", "move_prob_dir", "move_prob_conv",
+                "vacuum_status", "vacuum_dir", "vacuum_score",
+                "flip_breakout", "flip_breakout_dir",
+                "liq_accel", "liq_accel_dir", "liq_accel_score",
+                "wall_break", "wall_break_dir",
+                "squeeze", "trend_dir", "trend_pts", "trend_duration_min",
+                "trade_suggested", "trade_strike", "trade_type", "trade_dir",
+                "htl_verdict", "htl_score", "htl_source",
+                "ml_signal", "ml_confidence", "days_to_expiry",
+            ])
+        writer.writerow([
+            now.strftime("%H:%M:%S"), spot, atm, int(gamma), round(straddle, 1),
+            bias, confidence, regime, action,
+            call_wall, put_wall, flip_level, gravity, pcr_val,
+            momentum_5m, momentum_15m,
+            trap_type, trap_conf,
+            velocity or "", move_prob_score, move_prob_dir, move_prob_conv,
+            vacuum_status, vacuum_dir or "", vacuum_score,
+            flip_breakout_detected, flip_breakout_dir or "",
+            liq_accel_detected, liq_accel_dir or "", liq_accel_score,
+            wall_break_detected, wall_break_dir or "",
+            squeeze or "", trend_dir or "", trend_pts, trend_duration,
+            trade_suggested, trade_strike or "", trade_type or "", trade_dir or "",
+            htl_verdict or "", htl_score or "", htl_source or "",
+            ml_signal, ml_confidence or "", days_to_expiry,
+        ])
 
 
 # =============================================================================
@@ -1030,6 +1140,8 @@ def run_logger():
         if now.time() >= MARKET_CLOSE and not archived_today:
             archive_daily_log()
             archived_today = True
+            global _SIGNALS_CSV
+            _SIGNALS_CSV = None   # reset so next day gets a fresh file
             state.reset_session()
             if ml is not None:
                 try:
