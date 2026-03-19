@@ -111,11 +111,62 @@ import re
 import sys
 import csv
 import time
+import signal
+import platform
+import subprocess
 import unicodedata
+import atexit
 from datetime import datetime, timedelta
 
 from colorama import Fore, Style, init
 from notifier import send_telegram_message
+
+
+# =============================================================================
+# AUTO-CAFFEINATE — prevent macOS sleep while war room is running
+# =============================================================================
+_caffeinate_proc = None
+
+def _start_caffeinate():
+    """
+    Launch caffeinate as a child process on macOS.
+    -i = prevent idle sleep, -s = prevent system sleep on AC power.
+    The process dies automatically when the war room exits (atexit + signal).
+    """
+    global _caffeinate_proc
+    if platform.system() != "Darwin":
+        return  # only macOS
+    try:
+        _caffeinate_proc = subprocess.Popen(
+            ["caffeinate", "-i", "-s"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        print("☕ caffeinate active — machine will not sleep while war room runs")
+    except FileNotFoundError:
+        print("⚠ caffeinate not found — sleep prevention disabled")
+    except Exception as e:
+        print(f"⚠ caffeinate failed: {e}")
+
+def _stop_caffeinate():
+    global _caffeinate_proc
+    if _caffeinate_proc is not None:
+        try:
+            _caffeinate_proc.terminate()
+            _caffeinate_proc.wait(timeout=3)
+        except Exception:
+            pass
+        _caffeinate_proc = None
+
+atexit.register(_stop_caffeinate)
+
+# Also handle SIGTERM/SIGINT so caffeinate dies on Ctrl+C or kill
+def _signal_handler(signum, frame):
+    _stop_caffeinate()
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 from config import (
     MARKET_OPEN, MARKET_CLOSE, INSTRUMENT_PROFILES,
@@ -701,9 +752,13 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
               f"ML: {lr['label']}  ({lr['confidence']:.0%})  ±{lr['x_points']:.0f}pts"
               + Style.RESET_ALL + agree_tag + f"  next:{mins_left}m")
 
-    # Hold the line
+    # Hold the line — active trade OR shadow mode on last suggestion
     htl = None
+    htl_source = None   # "active" or "shadow"
+
     if state.active_trade is not None:
+        # ── Active trade: full HTL with exit logic ───────────────────────
+        htl_source = "active"
         at = state.active_trade
         wall_distance = compute_next_wall_distance(df, spot, at["option_type"])
         htl = hold_the_line(
@@ -732,6 +787,35 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
                 + " | ".join(htl["exit_reasons"][:2])
             )
             state.active_trade = None
+
+    elif state.last_suggestion is not None:
+        # ── Shadow HTL: no logged trade, but we have a suggestion ────────
+        # Shows what HTL *would* say if you'd entered on the last suggestion.
+        # No auto-exit, no Telegram — informational only.
+        htl_source = "shadow"
+        ls = state.last_suggestion
+        shadow_dir = ls["option_type"]   # "CE" or "PE"
+        wall_distance = compute_next_wall_distance(df, spot, shadow_dir)
+        htl = hold_the_line(
+            gamma=gamma, momentum_data=momentum_data,
+            next_wall_distance=wall_distance,
+            trade_direction=shadow_dir,
+            oi_signal=oi_signal, prev_gamma=state.previous_gamma,
+        )
+        verdict = htl["verdict"]
+        htl_color = (Fore.GREEN if verdict == "HOLD"
+                     else Fore.YELLOW if verdict == "TRAIL"
+        else Fore.RED)
+        htl_emoji = {"HOLD": "📈", "TRAIL": "⚠", "EXIT": "🚨"}[verdict]
+        top_reason = (htl["exit_reasons"] or htl["trail_reasons"] or htl["hold_reasons"])
+        reason_str = f"  {top_reason[0][:60]}" if top_reason else ""
+        print(htl_color +
+              f"{htl_emoji} SHADOW HTL: {verdict}  Score:{htl['hold_score']}  "
+              f"{reason_str}" + Style.RESET_ALL)
+        print(Fore.WHITE +
+              f"   (tracking {ls['strike']} {ls['option_type']} "
+              f"₹{ls['price']:.0f} — not logged, press Meta+I to enter)"
+              + Style.RESET_ALL)
 
     print("=" * 63)
 
@@ -1205,6 +1289,7 @@ def _register_trade_exit():
 # =============================================================================
 if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
+    _start_caffeinate()
     start_hotkey_listener()
     restore_state_from_csv(csv_file=CSV_FILE)
     run_logger()
