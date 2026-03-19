@@ -48,13 +48,15 @@ def _bs_put_price(S, K, T, r, sigma):
 # =============================================================================
 
 def implied_vol(S, K, T, r, market_price, option_type="CE",
-                tol=1e-5, max_iter=100):
+                tol=None, max_iter=100):
     """
     Newton-Raphson implied volatility solver.
     Returns IV as float, or None if it fails to converge.
     """
     if T <= 0 or market_price <= 0:
         return None
+    if tol is None:
+        tol = max(market_price * 1e-4, 1e-5)
 
     intrinsic = max(S - K, 0) if option_type == "CE" else max(K - S, 0)
     if market_price < intrinsic - 0.5:
