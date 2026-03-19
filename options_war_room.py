@@ -204,6 +204,9 @@ def colored_bias(bias):
         return Fore.YELLOW + "🟡 RANGE"
 
 
+def notify(message):
+    send_telegram_message(f"[{_instrument_arg}] {message}")
+
 # =============================================================================
 # DASHBOARD
 # =============================================================================
@@ -418,7 +421,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         prev_dist = state.previous_flip_distance
         just_entered = (prev_dist is None or prev_dist > GAMMA_FLIP_DANGER_ZONE) and dist <= GAMMA_FLIP_DANGER_ZONE
         if just_entered and not state.flip_approach_alerted:
-            send_telegram_message(
+            notify(
                 f"⚡ GAMMA FLIP ZONE: Spot {spot} approaching flip level {flip_level} "
                 f"({dist:.0f}pts away) — dealer regime may change!"
             )
@@ -525,7 +528,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         if state.vacuum_alerted != vac_key and status == "CONFIRMED":
             tg = build_vacuum_telegram(vacuum, spot)
             if tg:
-                send_telegram_message(tg)
+                notify(tg)
             state.vacuum_alerted = vac_key
     else:
         state.vacuum_alerted = None
@@ -543,7 +546,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         if state.vacuum_alerted != wb_key:
             tg = build_wall_break_telegram(wb, spot)
             if tg:
-                send_telegram_message(tg)
+                notify(tg)
             state.vacuum_alerted = wb_key
 
     # Gamma flip breakout
@@ -555,7 +558,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
               + Style.RESET_ALL)
         any_trigger = True
         if not state.gamma_flip_alerted:
-            send_telegram_message(
+            notify(
                 f"⚡ GAMMA FLIP BREAKOUT {fb_dir} | "
                 f"Spot {spot} crossed {fb_lvl} with IV expanding"
             )
@@ -579,7 +582,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         if state.trap_alerted != trap_key:
             tg = build_trap_telegram(trap, spot)
             if tg:
-                send_telegram_message(tg)
+                notify(tg)
             state.trap_alerted = trap_key
     else:
         state.trap_alerted = None
@@ -588,13 +591,13 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
     if war_break:
         msg = f"⚠ WAR BREAK: {war_break}  Spot:{spot}"
         print(Fore.RED + msg + Style.RESET_ALL)
-        send_telegram_message(msg)
+        notify(msg)
         any_trigger = True
 
     # Gamma squeeze
     if squeeze:
         print(Fore.RED + f"🚀 {squeeze}" + Style.RESET_ALL)
-        send_telegram_message(f"🚀 GAMMA SQUEEZE: {squeeze} | Spot {spot}")
+        notify(f"🚀 GAMMA SQUEEZE: {squeeze} | Spot {spot}")
         any_trigger = True
 
     # OI velocity — SURGE only
@@ -603,7 +606,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         speed_str = (f"  [{call_oi_speed:+,.0f} / {put_oi_speed:+,.0f}]"
                      if call_oi_speed is not None else "")
         print(vel_color + f"⚡ {velocity}{speed_str}" + Style.RESET_ALL)
-        send_telegram_message(
+        notify(
             f"⚡ {'BULLISH' if 'BULLISH' in velocity else 'BEARISH'} FLOW: "
             f"{velocity} | Spot {spot}"
         )
@@ -620,7 +623,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         any_trigger = True
         accel_key = f"{d}_{sc // 25}"
         if state.liq_accel_alerted != accel_key and conv == "HIGH":
-            send_telegram_message(
+            notify(
                 f"🚀 LIQUIDITY ACCELERATION {d} | Score:{sc} | Spot {spot}"
             )
             state.liq_accel_alerted = accel_key
@@ -723,7 +726,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
               f"@ ₹{at['entry_price']:.0f}  entered {at.get('entry_time', '?')}")
 
         if verdict == "EXIT":
-            send_telegram_message(
+            notify(
                 f"🚨 EXIT: {at['strike']} {at['option_type']} | "
                 f"Score:{htl['hold_score']} | "
                 + " | ".join(htl["exit_reasons"][:2])
@@ -839,7 +842,7 @@ def _print_feedback_verdicts(resolved):
         move_str = f"+{r['actual_move']:.1f}" if r["actual_move"] >= 0 else f"{r['actual_move']:.1f}"
         print(color + f"  {r['verdict']}  │  Called {sig_label} at {r['spot_at_signal']:.0f}  "
                       f"│  Moved {move_str}pts  │  Target was ±{r['x_points']:.0f}pts")
-        send_telegram_message(
+        notify(
             f"{r['verdict']} ML: called {sig_label} @ {r['spot_at_signal']:.0f} | "
             f"moved {move_str}pts | ±{r['x_points']:.0f}pts → {r['outcome'].upper()}"
         )
@@ -918,7 +921,7 @@ def archive_daily_log():
 
     os.rename(CSV_FILE, archived)
     print(f"📁 Log archived → {archived}")
-    send_telegram_message(f"📁 Day complete. Log saved as `{archived}`")
+    notify(f"📁 Day complete. Log saved as `{archived}`")
 
 
 # =============================================================================
@@ -1022,7 +1025,7 @@ def run_logger():
             consecutive_errors += 1
             print(f"⚠ Error ({consecutive_errors}/{MAX_ERRORS}): {e}")
             if consecutive_errors >= MAX_ERRORS:
-                send_telegram_message(
+                notify(
                     f"🚨 WAR ROOM DOWN — {consecutive_errors} errors. Last: {e}"
                 )
                 consecutive_errors = 0
@@ -1116,7 +1119,7 @@ def _register_trade_entry():
         msg = (f"✅ ENTERED: {s['strike']} {s['option_type']} "
                f"₹{s['price']:.0f} ×{s['lots']} | {now}")
         print(f"\n{'─' * 50}\n  {Fore.GREEN}{msg}{Style.RESET_ALL}\n{'─' * 50}")
-        send_telegram_message(
+        notify(
             f"🟢 ENTRY: {s['strike']} {s['option_type']} @ ₹{s['price']:.0f} "
             f"| ×{s['lots']} | Stop ₹{s['stop']:.0f} | Target ₹{s['target']:.0f} | {now}"
         )
@@ -1157,7 +1160,7 @@ def _register_trade_entry():
                 }
                 msg = f"✅ MANUAL: {strike} {opt_type} ₹{entry_price:.0f} ×{lots} | {now}"
                 print(f"  {Fore.GREEN}{msg}{Style.RESET_ALL}\n{'─' * 50}")
-                send_telegram_message(
+                notify(
                     f"🟢 MANUAL ENTRY: {strike} {opt_type} @ ₹{entry_price:.0f} | ×{lots} | {now}"
                 )
             except (EOFError, ValueError) as e:
@@ -1190,7 +1193,7 @@ def _register_trade_exit():
     print(f"  {at['strike']} {at['option_type']} | "
           f"Entry ₹{at['entry_price']:.0f} @ {at['entry_time']} | Exited {now}")
     print(f"{'─' * 50}")
-    send_telegram_message(
+    notify(
         f"🔴 EXIT (manual): {at['strike']} {at['option_type']} | "
         f"Entry ₹{at['entry_price']:.0f} @ {at['entry_time']} | Exited {now}"
     )
