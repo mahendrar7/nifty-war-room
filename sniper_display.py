@@ -61,7 +61,8 @@ TODO
 
 from colorama import Fore, Style
 from config import (CHOP_KILLER_GAMMA_MIN, SNIPER_TAKE_TRADE,
-                    SNIPER_SEND_IT, SNIPER_STALK)
+                    SNIPER_SEND_IT, SNIPER_STALK,
+                    GAMMA_MOMENTUM_LOOKBACK, GAMMA_MOMENTUM_CHOP_EASE)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -167,13 +168,14 @@ def sniper_notify(notify_fn, action, message):
 # Max possible = 10. You need 6+ to fire.
 
 W = {
-    "gamma_structure":   1.5,   # gamma sign + flip proximity + wall proximity
-    "straddle_momentum": 1.25,  # straddle expanding = fuel for the move
-    "spot_vs_walls":     1.5,   # near wall = setup, mid-range = noise
-    "oi_velocity":       1.25,  # OI SURGE = real flow, not just noise
+    "gamma_structure":   1.25,  # gamma sign + flip proximity + wall proximity
+    "gamma_momentum":    1.25,  # gamma declining = regime change imminent
+    "straddle_momentum": 1.0,   # straddle expanding = fuel for the move
+    "spot_vs_walls":     1.25,  # near wall = setup, mid-range = noise
+    "oi_velocity":       1.0,   # OI SURGE = real flow, not just noise
     "iv_premium":        0.5,   # REDUCED — overlaps with straddle & MPM
     "move_prob":         1.0,   # your existing MPM — already synthesised
-    "structural_event":  1.5,   # vacuum / flip breakout / liq accel / squeeze
+    "structural_event":  1.25,  # vacuum / flip breakout / liq accel / squeeze
     "trend":             1.5,   # price-action trend — fallback when OI signals lag
 }
 # Sum = 10.0
@@ -409,11 +411,14 @@ def _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze)
     if flip_breakout and flip_breakout.get("detected"):
         score = max(score, 0.9)
 
-    # Liquidity acceleration
+    # Liquidity acceleration — score by conviction AND raw score
     if liq_accel and liq_accel.get("detected"):
         conv = liq_accel.get("conviction", "LOW")
+        accel_score = liq_accel.get("score", 0)
         if conv == "HIGH":
             score = max(score, 1.0)
+        elif accel_score >= 60:
+            score = max(score, 0.8)
         else:
             score = max(score, 0.6)
 
@@ -466,13 +471,87 @@ def _score_trend(trend):
     return min(1.0, score)
 
 
+def compute_gamma_momentum(gamma_history):
+    """
+    Compute gamma rate-of-change from history.
+    Returns dict: {
+        "declining": bool,      — gamma is dropping (toward flip)
+        "drop_pct": float,      — how much gamma dropped (0-1)
+        "flipping": bool,       — gamma crossed zero or about to
+        "direction": "DOWN"/"UP"/"FLAT"
+    }
+    """
+    if not gamma_history or len(gamma_history) < 3:
+        return {"declining": False, "drop_pct": 0.0, "flipping": False, "direction": "FLAT"}
+
+    lookback = min(len(gamma_history), GAMMA_MOMENTUM_LOOKBACK)
+    recent = list(gamma_history)[-lookback:]
+    first, last = recent[0], recent[-1]
+
+    # Drop percentage (only meaningful when gamma was positive)
+    if first > 0 and first > 1e10:
+        drop_pct = max(0.0, (first - last) / first)
+    elif first < 0 and first < -1e10:
+        # Gamma getting more negative = strengthening downside
+        drop_pct = max(0.0, (first - last) / abs(first))
+    else:
+        drop_pct = 0.0
+
+    # Detect sign change or near-zero crossing
+    flipping = (first > 0 and last <= 0) or (first >= 0 and last < 0)
+    near_flip = first > 0 and last > 0 and last < first * 0.3  # dropped to <30% of original
+
+    # Direction of gamma movement
+    if last < first:
+        direction = "DOWN"  # gamma declining (moving toward negative)
+    elif last > first:
+        direction = "UP"    # gamma increasing (moving toward positive)
+    else:
+        direction = "FLAT"
+
+    declining = direction == "DOWN" and drop_pct >= 0.15
+
+    return {
+        "declining": declining,
+        "drop_pct": round(drop_pct, 3),
+        "flipping": flipping or near_flip,
+        "direction": direction,
+    }
+
+
+def _score_gamma_momentum(gamma_mom):
+    """
+    Score the gamma rate-of-change.
+    Rapidly declining gamma = imminent regime change = high-edge setup.
+    """
+    if not gamma_mom or not gamma_mom.get("declining"):
+        return 0.0
+
+    score = 0.0
+    drop_pct = gamma_mom.get("drop_pct", 0)
+
+    # Gamma flipping (crossed zero or about to)
+    if gamma_mom.get("flipping"):
+        score += 0.5
+
+    # Drop magnitude
+    if drop_pct >= 0.7:
+        score += 0.5     # gamma collapsed — regime change imminent
+    elif drop_pct >= 0.5:
+        score += 0.35
+    elif drop_pct >= 0.3:
+        score += 0.2
+
+    return min(1.0, score)
+
+
 # ─────────────────────────────────────────────────────────────
 # SETUP CLASSIFIER
 # ─────────────────────────────────────────────────────────────
 
 def _classify_setup(vacuum, wall_break_vac, flip_breakout, liq_accel,
                     squeeze, trap, velocity, gamma, momentum_data,
-                    spot, call_wall, put_wall, trend):
+                    spot, call_wall, put_wall, trend, gamma_mom=None):
     """
     Returns a human-readable setup name.
     Priority: structural events > flow > position.
@@ -502,6 +581,10 @@ def _classify_setup(vacuum, wall_break_vac, flip_breakout, liq_accel,
         pts = trend.get("move_pts", 0)
         if pts >= 15:
             return "TREND CONTINUATION"
+
+    # Gamma regime shift — gamma collapsing or flipping
+    if gamma_mom and (gamma_mom.get("flipping") or gamma_mom.get("drop_pct", 0) >= 0.5):
+        return "GAMMA SHIFT"
 
     # Flow-driven
     vel = (velocity or "").upper()
@@ -577,7 +660,8 @@ def _resolve_direction(bias, move_prob, flip_breakout, vacuum,
 
 def _decide_action(total_score, setup, confidence, trap, bias, days_to_expiry,
                    regime=None, active_trade=None, direction=None,
-                   is_locked=False, lock_reason=None, gamma=0):
+                   is_locked=False, lock_reason=None, gamma=0,
+                   gamma_mom=None):
     """
     Returns (action_text, action_color, action_icon).
     """
@@ -589,12 +673,14 @@ def _decide_action(total_score, setup, confidence, trap, bias, days_to_expiry,
         reason_tag = f" ({lock_reason})" if lock_reason else ""
         return f"LOCKED{reason_tag}", Fore.CYAN, "🔒"
 
-    # ── Fix 2: Chop killer — hard block on chop regimes ──────────────
-    # Only block when gamma is meaningfully positive (strong pin), not barely > 0
+    # ── Chop killer — hard block on chop regimes ─────────────────────
+    # Eased when gamma is declining fast (regime about to change)
+    gamma_declining = (gamma_mom and gamma_mom.get("declining")
+                       and gamma_mom.get("drop_pct", 0) >= GAMMA_MOMENTUM_CHOP_EASE)
     chop_regimes = ("CHOP", "RANGE LOCK")
     gamma_pinning_strong = "GAMMA PINNING" in (regime or "").upper() and gamma > CHOP_KILLER_GAMMA_MIN
     if regime and (any(r in regime.upper() for r in chop_regimes) or gamma_pinning_strong):
-        if total_score < SNIPER_TAKE_TRADE:
+        if not gamma_declining and total_score < SNIPER_TAKE_TRADE:
             return "CHOP — NO TRADE", Fore.RED, "🧱"
 
     # Hard blocks
@@ -603,10 +689,11 @@ def _decide_action(total_score, setup, confidence, trap, bias, days_to_expiry,
     if setup == "DEVELOPING" and total_score < SNIPER_TAKE_TRADE:
         return "NO EDGE — WAIT", Fore.RED, "🚫"
 
-    # Trap warning (but don't block structural setups or trends)
+    # Trap warning (but don't block structural setups, trends, or gamma shifts)
     if trap_conf >= 80 and setup not in (
         "TRAP FADE", "FLIP BREAKOUT", "VACUUM DRIVE",
-        "LIQ ACCELERATION", "GAMMA SQUEEZE", "TREND CONTINUATION"
+        "LIQ ACCELERATION", "GAMMA SQUEEZE", "TREND CONTINUATION",
+        "GAMMA SHIFT"
     ):
         return "TRAP RISK — SKIP", Fore.RED, "🪤"
 
@@ -651,6 +738,7 @@ def sniper_display(
     gamma_shift=None,
     notify_fn=None,
     debug=False,
+    gamma_history=None,
 ):
     """
     Call this at the end of print_dashboard().
@@ -664,9 +752,13 @@ def sniper_display(
     # ── Evaluate trade lock ────────────────────────────────────
     is_locked, lock_reason = _sniper_lock.evaluate(active_trade, gamma_shift)
 
+    # ── Compute gamma momentum ─────────────────────────────────
+    gamma_mom = compute_gamma_momentum(gamma_history)
+
     # ── Score each signal ──────────────────────────────────────
     scores = {
         "gamma_structure":   _score_gamma(gamma, flip_level, spot, call_wall, put_wall),
+        "gamma_momentum":    _score_gamma_momentum(gamma_mom),
         "straddle_momentum": _score_straddle(momentum_data),
         "spot_vs_walls":     _score_spot_vs_walls(spot, call_wall, put_wall, gamma),
         "oi_velocity":       _score_oi_velocity(velocity, call_oi_speed, put_oi_speed),
@@ -683,7 +775,7 @@ def sniper_display(
     setup = _classify_setup(
         vacuum, wall_break_vac, flip_breakout, liq_accel,
         squeeze, trap, velocity, gamma, momentum_data,
-        spot, call_wall, put_wall, trend,
+        spot, call_wall, put_wall, trend, gamma_mom=gamma_mom,
     )
     direction, dir_color = _resolve_direction(
         bias, move_prob, flip_breakout, vacuum,
@@ -707,6 +799,7 @@ def sniper_display(
         total, setup, confidence, trap, bias, days_to_expiry,
         regime=regime, active_trade=active_trade, direction=direction,
         is_locked=is_locked, lock_reason=lock_reason, gamma=gamma,
+        gamma_mom=gamma_mom,
     )
 
     # ── Score bar ──────────────────────────────────────────────
@@ -749,6 +842,7 @@ def sniper_display(
         parts = []
         labels = {
             "gamma_structure":   "Γ",
+            "gamma_momentum":    "ΓΔ",
             "straddle_momentum": "Str",
             "spot_vs_walls":     "Spt",
             "oi_velocity":       "OI",

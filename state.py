@@ -88,6 +88,9 @@ class MarketState:
         # NEW: spot history for trend detection
         self.spot_history        = deque(maxlen=60)  # last 60 minutes
 
+        # NEW: gamma history for momentum / rate-of-change tracking
+        self.gamma_history       = deque(maxlen=10)  # last 10 candles
+
         # NEW: throttle cache for slow-compute signals
         self.throttle_cache      = {}   # {"signal_name": {"tick": N, "result": ...}}
         self.tick_counter        = 0    # incremented every main loop iteration

@@ -335,6 +335,8 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
     prev_spot = state.previous_spot
     # Track spot history for trend detection
     state.spot_history.append(spot)
+    # Track gamma history for momentum / rate-of-change
+    state.gamma_history.append(gamma)
 
     days_to_expiry = (expiry - datetime.now().date()).days
     momentum_5m = momentum_data["momentum_5m"] if momentum_data else None
@@ -827,7 +829,8 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         flip_level=flip_level, regime=regime,
         trade=None, days_to_expiry=days_to_expiry,
         call_oi_speed=call_oi_speed, put_oi_speed=put_oi_speed,
-        gamma_shift=gamma_shift, notify_fn=None, debug=DEBUG_MODE
+        gamma_shift=gamma_shift, notify_fn=None, debug=DEBUG_MODE,
+        gamma_history=list(state.gamma_history),
     )
 
     # TRADE SUGGESTION — only when sniper endorses

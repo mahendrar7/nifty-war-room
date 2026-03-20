@@ -33,9 +33,10 @@ from detectors import (
     compute_move_probability,
 )
 from sniper_display import (
-    _score_gamma, _score_straddle, _score_spot_vs_walls,
+    _score_gamma, _score_gamma_momentum, _score_straddle, _score_spot_vs_walls,
     _score_oi_velocity, _score_iv, _score_move_prob,
     _score_structural, _score_trend,
+    compute_gamma_momentum,
     _classify_setup, _resolve_direction, _decide_action,
     W,
 )
@@ -215,6 +216,7 @@ def run_backtest(signals_path):
 
     # ── Pass 1: Score every row ──────────────────────────────────────
     spot_history = deque(maxlen=TREND_WINDOW_MINUTES)
+    gamma_history = deque(maxlen=10)
     prev_spot = None
     prev_df = None
     results = []
@@ -239,6 +241,7 @@ def run_backtest(signals_path):
         spots.append(spot)
         timestamps.append(timestamp)
         spot_history.append(spot)
+        gamma_history.append(gamma)
 
         # Reconstruct momentum_data
         mom_5m = parse_float(row.get("straddle_mom_5m"))
@@ -311,9 +314,13 @@ def run_backtest(signals_path):
             momentum_strikes=None, trend=trend,
         )
 
+        # ── Gamma momentum ───────────────────────────────────────────
+        gamma_mom = compute_gamma_momentum(list(gamma_history))
+
         # ── Score ────────────────────────────────────────────────────
         scores = {
             "gamma_structure":   _score_gamma(gamma, flip_level, spot, call_wall, put_wall),
+            "gamma_momentum":    _score_gamma_momentum(gamma_mom),
             "straddle_momentum": _score_straddle(momentum_data),
             "spot_vs_walls":     _score_spot_vs_walls(spot, call_wall, put_wall, gamma),
             "oi_velocity":       _score_oi_velocity(velocity, None, None),
@@ -328,7 +335,7 @@ def run_backtest(signals_path):
         setup = _classify_setup(
             vacuum, wall_break_vac, flip_breakout, liq_accel,
             squeeze, trap, velocity, gamma, momentum_data,
-            spot, call_wall, put_wall, trend,
+            spot, call_wall, put_wall, trend, gamma_mom=gamma_mom,
         )
         direction, _ = _resolve_direction(
             bias, move_prob, flip_breakout, vacuum,
@@ -347,6 +354,7 @@ def run_backtest(signals_path):
         action, _, _ = _decide_action(
             total, setup, confidence, trap, bias, days_to_expiry,
             regime=regime, direction=direction, gamma=gamma,
+            gamma_mom=gamma_mom,
         )
 
         # Track structural events that fired (for reporting)
@@ -373,6 +381,7 @@ def run_backtest(signals_path):
             "trend": trend,
             "move_prob": move_prob.get("probability", 0),
             "gamma": gamma,
+            "gamma_mom": gamma_mom,
             "structural_fired": structural_fired,
         })
 
@@ -493,11 +502,13 @@ def run_backtest(signals_path):
         breakdown = ""
         if best:
             parts = []
-            for k in ("gamma_structure", "straddle_momentum", "spot_vs_walls",
-                       "oi_velocity", "move_prob", "structural_event", "trend"):
+            for k in ("gamma_structure", "gamma_momentum", "straddle_momentum",
+                       "spot_vs_walls", "oi_velocity", "move_prob",
+                       "structural_event", "trend"):
                 val = best["scores"].get(k, 0) * W.get(k, 0)
                 if val > 0:
-                    label = {"gamma_structure": "Gam", "straddle_momentum": "Str",
+                    label = {"gamma_structure": "Gam", "gamma_momentum": "GΔ",
+                             "straddle_momentum": "Str",
                              "spot_vs_walls": "Spt", "oi_velocity": "OI",
                              "move_prob": "MPM", "structural_event": "Evt",
                              "trend": "Trd", "iv_premium": "IV"}[k]

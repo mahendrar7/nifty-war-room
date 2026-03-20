@@ -132,6 +132,8 @@ CHOP_KILLER_GAMMA_MIN = 5e13   # only apply chop killer when gamma > this (stron
 SNIPER_TAKE_TRADE     = 5.5    # score threshold for TAKE TRADE (was 7.0)
 SNIPER_SEND_IT        = 7.0    # score threshold for SEND IT (was 8.5)
 SNIPER_STALK          = 4.0    # score threshold for STALK (was 5.5)
+GAMMA_MOMENTUM_LOOKBACK   = 5     # candles to compute gamma rate-of-change
+GAMMA_MOMENTUM_CHOP_EASE  = 0.30  # if gamma dropped >30% over lookback, ease chop killer
 
 # -----------------------------
 # WALL RETREAT DETECTION
