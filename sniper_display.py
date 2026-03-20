@@ -169,14 +169,14 @@ def sniper_notify(notify_fn, action, message):
 
 W = {
     "gamma_structure":   1.25,  # gamma sign + flip proximity + wall proximity
-    "gamma_momentum":    1.25,  # gamma declining = regime change imminent
-    "straddle_momentum": 1.0,   # straddle expanding = fuel for the move
-    "spot_vs_walls":     1.25,  # near wall = setup, mid-range = noise
-    "oi_velocity":       1.0,   # OI SURGE = real flow, not just noise
-    "iv_premium":        0.5,   # REDUCED — overlaps with straddle & MPM
-    "move_prob":         1.0,   # your existing MPM — already synthesised
+    "gamma_momentum":    1.50,  # gamma declining OR sustained negative = trending
+    "straddle_momentum": 1.25,  # straddle expanding = fuel for the move
+    "spot_vs_walls":     1.25,  # near/past wall = setup, mid-range = noise
+    "oi_velocity":       0.50,  # OI SURGE = real flow — rare, low weight
+    "iv_premium":        0.50,  # REDUCED — overlaps with straddle & MPM
+    "move_prob":         0.75,  # your existing MPM — already synthesised
     "structural_event":  1.25,  # vacuum / flip breakout / liq accel / squeeze
-    "trend":             1.5,   # price-action trend — fallback when OI signals lag
+    "trend":             1.75,  # price-action trend — fallback when OI signals lag
 }
 # Sum = 10.0
 
@@ -258,17 +258,30 @@ def _score_spot_vs_walls(spot, call_wall, put_wall, gamma):
     """
     Near a wall with negative gamma = breakout potential.
     Mid-range with positive gamma = pinned = low score.
+    Past a wall = breakout underway = high score.
     """
     total_range = call_wall - put_wall
     if total_range <= 0:
         return 0.0
 
+    score = 0.0
+
+    # Spot has broken PAST a wall — strong breakout signal
+    if spot > call_wall:
+        score += 0.7
+        if gamma < 0:
+            score += 0.3  # dealers short gamma = accelerating
+        return min(1.0, score)
+    if spot < put_wall:
+        score += 0.7
+        if gamma < 0:
+            score += 0.3
+        return min(1.0, score)
+
     # Position in range: 0 = at put wall, 1 = at call wall
     position = (spot - put_wall) / total_range
     # Distance from nearest wall as fraction of range
     wall_frac = min(position, 1 - position)
-
-    score = 0.0
 
     # Near wall (within 15% of range from either side)
     if wall_frac <= 0.15:
@@ -511,36 +524,62 @@ def compute_gamma_momentum(gamma_history):
 
     declining = direction == "DOWN" and drop_pct >= 0.15
 
+    # Sustained negative gamma — dealers short, trending environment
+    sustained_negative = all(g < 0 for g in recent)
+    # How negative is it (magnitude relative to typical gamma)
+    neg_strength = 0.0
+    if last < 0:
+        neg_strength = min(1.0, abs(last) / 5e13)  # normalize: 5e13 = strong negative
+
     return {
         "declining": declining,
         "drop_pct": round(drop_pct, 3),
         "flipping": flipping or near_flip,
         "direction": direction,
+        "sustained_negative": sustained_negative,
+        "neg_strength": round(neg_strength, 3),
     }
 
 
 def _score_gamma_momentum(gamma_mom):
     """
-    Score the gamma rate-of-change.
-    Rapidly declining gamma = imminent regime change = high-edge setup.
+    Score gamma rate-of-change AND sustained negative gamma.
+    Declining gamma = imminent regime change.
+    Sustained negative gamma = dealers short = trending environment.
     """
-    if not gamma_mom or not gamma_mom.get("declining"):
+    if not gamma_mom:
         return 0.0
 
     score = 0.0
-    drop_pct = gamma_mom.get("drop_pct", 0)
 
-    # Gamma flipping (crossed zero or about to)
-    if gamma_mom.get("flipping"):
-        score += 0.5
+    # --- Sustained negative gamma: dealers short, market can trend ---
+    if gamma_mom.get("sustained_negative"):
+        neg_str = gamma_mom.get("neg_strength", 0)
+        if neg_str >= 0.8:
+            score += 0.5   # strongly negative — full trending environment
+        elif neg_str >= 0.4:
+            score += 0.35  # moderately negative
+        else:
+            score += 0.2   # mildly negative but sustained
+    elif gamma_mom.get("neg_strength", 0) > 0:
+        # Currently negative but not sustained (recently flipped)
+        score += 0.15
 
-    # Drop magnitude
-    if drop_pct >= 0.7:
-        score += 0.5     # gamma collapsed — regime change imminent
-    elif drop_pct >= 0.5:
-        score += 0.35
-    elif drop_pct >= 0.3:
-        score += 0.2
+    # --- Declining gamma: rate-of-change signals ---
+    if gamma_mom.get("declining"):
+        drop_pct = gamma_mom.get("drop_pct", 0)
+
+        # Gamma flipping (crossed zero or about to)
+        if gamma_mom.get("flipping"):
+            score += 0.3
+
+        # Drop magnitude
+        if drop_pct >= 0.7:
+            score += 0.3     # gamma collapsed
+        elif drop_pct >= 0.5:
+            score += 0.2
+        elif drop_pct >= 0.3:
+            score += 0.1
 
     return min(1.0, score)
 

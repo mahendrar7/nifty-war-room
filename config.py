@@ -129,7 +129,7 @@ TREND_BIAS_BOOST      = 30    # add this to directional confidence in trends
 # SNIPER TUNING
 # -----------------------------
 CHOP_KILLER_GAMMA_MIN = 5e13   # only apply chop killer when gamma > this (strong pin)
-SNIPER_TAKE_TRADE     = 5.5    # score threshold for TAKE TRADE (was 7.0)
+SNIPER_TAKE_TRADE     = 5.0    # score threshold for TAKE TRADE (was 5.5)
 SNIPER_SEND_IT        = 7.0    # score threshold for SEND IT (was 8.5)
 SNIPER_STALK          = 4.0    # score threshold for STALK (was 5.5)
 GAMMA_MOMENTUM_LOOKBACK   = 5     # candles to compute gamma rate-of-change
