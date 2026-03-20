@@ -120,7 +120,7 @@ from datetime import datetime, timedelta
 
 from colorama import Fore, Style, init
 from notifier import send_telegram_message
-
+from sniper_display import sniper_display
 
 # =============================================================================
 # AUTO-CAFFEINATE — prevent macOS sleep while war room is running
@@ -218,6 +218,10 @@ init(autoreset=True)
 
 # Global — toggled by Ctrl+D hotkey
 DEBUG_MODE = False
+
+# When False, only sniper TAKE TRADE / SEND IT alerts and trade mgmt messages fire.
+# When True, individual signal alerts (vacuum, flip, trap, squeeze, etc.) also fire.
+TELEGRAM_VERBOSE = False
 
 # =============================================================================
 # FORMATTING HELPERS
@@ -472,10 +476,11 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         prev_dist = state.previous_flip_distance
         just_entered = (prev_dist is None or prev_dist > GAMMA_FLIP_DANGER_ZONE) and dist <= GAMMA_FLIP_DANGER_ZONE
         if just_entered and not state.flip_approach_alerted:
-            notify(
-                f"⚡ GAMMA FLIP ZONE: Spot {spot} approaching flip level {flip_level} "
-                f"({dist:.0f}pts away) — dealer regime may change!"
-            )
+            if TELEGRAM_VERBOSE:
+                notify(
+                    f"⚡ GAMMA FLIP ZONE: Spot {spot} approaching flip level {flip_level} "
+                    f"({dist:.0f}pts away) — dealer regime may change!"
+                )
             state.flip_approach_alerted = True
         elif dist > GAMMA_FLIP_DANGER_ZONE * 2:
             state.flip_approach_alerted = False
@@ -577,9 +582,10 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         any_trigger = True
         vac_key = f"{vacuum['direction']}_{vacuum['score'] // 20}"
         if state.vacuum_alerted != vac_key and status == "CONFIRMED":
-            tg = build_vacuum_telegram(vacuum, spot)
-            if tg:
-                notify(tg)
+            if TELEGRAM_VERBOSE:
+                tg = build_vacuum_telegram(vacuum, spot)
+                if tg:
+                    notify(tg)
             state.vacuum_alerted = vac_key
     else:
         state.vacuum_alerted = None
@@ -595,9 +601,10 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         any_trigger = True
         wb_key = f"wb_{wb['broken_wall']}"
         if state.vacuum_alerted != wb_key:
-            tg = build_wall_break_telegram(wb, spot)
-            if tg:
-                notify(tg)
+            if TELEGRAM_VERBOSE:
+                tg = build_wall_break_telegram(wb, spot)
+                if tg:
+                    notify(tg)
             state.vacuum_alerted = wb_key
 
     # Gamma flip breakout
@@ -608,7 +615,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
               f"⚡ GAMMA FLIP BREAKOUT  {fb_dir}  Crossed:{fb_lvl}"
               + Style.RESET_ALL)
         any_trigger = True
-        if not state.gamma_flip_alerted:
+        if not state.gamma_flip_alerted and TELEGRAM_VERBOSE:
             notify(
                 f"⚡ GAMMA FLIP BREAKOUT {fb_dir} | "
                 f"Spot {spot} crossed {fb_lvl} with IV expanding"
@@ -631,9 +638,10 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         any_trigger = True
         trap_key = f"{t}_{conf // 20}"
         if state.trap_alerted != trap_key:
-            tg = build_trap_telegram(trap, spot)
-            if tg:
-                notify(tg)
+            if TELEGRAM_VERBOSE:
+                tg = build_trap_telegram(trap, spot)
+                if tg:
+                    notify(tg)
             state.trap_alerted = trap_key
     else:
         state.trap_alerted = None
@@ -642,13 +650,15 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
     if war_break:
         msg = f"⚠ WAR BREAK: {war_break}  Spot:{spot}"
         print(Fore.RED + msg + Style.RESET_ALL)
-        notify(msg)
+        if TELEGRAM_VERBOSE:
+            notify(msg)
         any_trigger = True
 
     # Gamma squeeze
     if squeeze:
         print(Fore.RED + f"🚀 {squeeze}" + Style.RESET_ALL)
-        notify(f"🚀 GAMMA SQUEEZE: {squeeze} | Spot {spot}")
+        if TELEGRAM_VERBOSE:
+            notify(f"🚀 GAMMA SQUEEZE: {squeeze} | Spot {spot}")
         any_trigger = True
 
     # OI velocity — SURGE only
@@ -657,10 +667,11 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         speed_str = (f"  [{call_oi_speed:+,.0f} / {put_oi_speed:+,.0f}]"
                      if call_oi_speed is not None else "")
         print(vel_color + f"⚡ {velocity}{speed_str}" + Style.RESET_ALL)
-        notify(
-            f"⚡ {'BULLISH' if 'BULLISH' in velocity else 'BEARISH'} FLOW: "
-            f"{velocity} | Spot {spot}"
-        )
+        if TELEGRAM_VERBOSE:
+            notify(
+                f"⚡ {'BULLISH' if 'BULLISH' in velocity else 'BEARISH'} FLOW: "
+                f"{velocity} | Spot {spot}"
+            )
         any_trigger = True
 
     # Liquidity acceleration
@@ -673,7 +684,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         print(la_color + f"{emoji} ACCEL {d}  Score:{sc}  {conv}" + Style.RESET_ALL)
         any_trigger = True
         accel_key = f"{d}_{sc // 25}"
-        if state.liq_accel_alerted != accel_key and conv == "HIGH":
+        if state.liq_accel_alerted != accel_key and conv == "HIGH" and TELEGRAM_VERBOSE:
             notify(
                 f"🚀 LIQUIDITY ACCELERATION {d} | Score:{sc} | Spot {spot}"
             )
@@ -816,6 +827,21 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
               f"   (tracking {ls['strike']} {ls['option_type']} "
               f"₹{ls['price']:.0f} — not logged, press Meta+I to enter)"
               + Style.RESET_ALL)
+
+    # SNIPER DISPLAY
+    sniper_display(
+        spot=spot, bias=bias, confidence=confidence,
+        gamma=gamma, straddle=straddle, momentum_data=momentum_data,
+        move_prob=move_prob, trap=trap, velocity=velocity,
+        vacuum=vacuum, wall_break_vac=wall_break_vac,
+        flip_breakout=flip_breakout, liq_accel=liq_accel,
+        squeeze=squeeze, trend=trend,
+        call_wall=call_wall, put_wall=put_wall,
+        flip_level=flip_level, regime=regime,
+        trade=trade, days_to_expiry=days_to_expiry,
+        call_oi_speed=call_oi_speed, put_oi_speed=put_oi_speed,
+        gamma_shift=gamma_shift,notify_fn=notify,debug=DEBUG_MODE
+    )
 
     print("=" * 63)
 
