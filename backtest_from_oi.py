@@ -451,6 +451,139 @@ def print_day_detail(summary):
               f"{status}  best=[{best['score'] if best else 0}/10]")
 
 
+def simulate_pnl(summary, num_lots=2, lot_size=65, delta=0.3, stop_pts=25):
+    """Simulate P&L for a single day's backtest results."""
+    results = summary["results"]
+    swings = summary["swings_list"]
+    qty = lot_size * num_lots
+
+    trades = []
+    cooldown = 0
+    for i, r in enumerate(results):
+        if cooldown > 0:
+            cooldown -= 1
+            continue
+        if r["action"] not in ("TAKE TRADE", "SEND IT"):
+            continue
+
+        direction = r["direction"]
+        entry_spot = r["spot"]
+        cooldown = 9
+
+        # Match to a swing
+        matched_swing = None
+        for sw in swings:
+            sw_dir = "LONG" if sw["direction"] == "UP" else "SHORT"
+            if sw["start_idx"] - 3 <= i <= sw["end_idx"]:
+                if sw_dir == direction or direction == "NEUTRAL":
+                    matched_swing = sw
+                    break
+
+        # Forward price action (next 30 candles)
+        future = results[i:i + 30]
+        max_adverse = 0
+        for fr in future[1:16]:
+            move = fr["spot"] - entry_spot
+            if direction == "SHORT":
+                move = -move
+            elif direction == "NEUTRAL":
+                move = -abs(move)  # worst case for neutral
+            if move < 0:
+                max_adverse = max(max_adverse, abs(move))
+
+        nifty_stop = stop_pts / delta  # Nifty pts that would trigger option stop
+
+        if max_adverse >= nifty_stop:
+            # Stopped out
+            pnl = -stop_pts * qty
+            trades.append({"pnl": pnl, "result": "STOP", "pts": 0})
+        elif matched_swing:
+            swing_pts = abs(matched_swing["pts"])
+            avg_delta = min(0.45, delta + (swing_pts / 500) * 0.15)
+            option_move = swing_pts * avg_delta
+            pnl = option_move * qty
+            trades.append({"pnl": pnl, "result": "WIN", "pts": swing_pts})
+        else:
+            pnl = -5 * qty  # scratch/spread
+            trades.append({"pnl": pnl, "result": "FLAT", "pts": 0})
+
+    return trades
+
+
+def run_daily_report(instrument="nifty", min_pts=50, num_lots=2, lot_size=65):
+    """
+    Run after market close. Prints today's performance and cumulative stats.
+    Called from options_war_room.py after ML retrain.
+    """
+    import glob as g
+    from datetime import datetime
+
+    date_str = datetime.now().strftime("%d%m%Y")
+    today_file = f"data/options_log_1min_{instrument}_{date_str}.csv"
+    all_files = sorted(g.glob(f"data/options_log_1min_{instrument}_*.csv"))
+
+    print(f"\n{'='*70}")
+    print(f"  SNIPER DAILY REPORT — {date_str}")
+    print(f"{'='*70}")
+
+    # --- Today ---
+    if os.path.exists(today_file):
+        today = run_one_day(today_file, min_pts=min_pts)
+        if today and today["swings"] > 0:
+            trades_today = simulate_pnl(today, num_lots=num_lots, lot_size=lot_size)
+            wins = sum(1 for t in trades_today if t["result"] == "WIN")
+            stops = sum(1 for t in trades_today if t["result"] == "STOP")
+            pnl_today = sum(t["pnl"] for t in trades_today)
+            rate = (today["caught"] + today["stalked"]) / today["swings"] * 100
+
+            print(f"\n  TODAY ({os.path.basename(today_file)})")
+            print(f"  Swings: {today['swings']}  |  Caught: {today['caught']}  |  "
+                  f"Stalked: {today['stalked']}  |  Missed: {today['missed']}  |  Rate: {rate:.0f}%")
+            print(f"  Trades: {len(trades_today)}  |  Wins: {wins}  |  Stops: {stops}")
+            print(f"  P&L: Rs {pnl_today:+,.0f}")
+        else:
+            print(f"\n  TODAY: No 50pt+ swings detected")
+    else:
+        print(f"\n  TODAY: {today_file} not found")
+
+    # --- Cumulative ---
+    if len(all_files) > 1:
+        cum_swings = cum_caught = cum_stalked = cum_missed = 0
+        cum_pnl = 0
+        cum_trades = 0
+        cum_wins = 0
+        cum_stops = 0
+        day_count = 0
+
+        for f in all_files:
+            s = run_one_day(f, min_pts=min_pts)
+            if not s or s["swings"] == 0:
+                continue
+            day_count += 1
+            cum_swings += s["swings"]
+            cum_caught += s["caught"]
+            cum_stalked += s["stalked"]
+            cum_missed += s["missed"]
+
+            trades = simulate_pnl(s, num_lots=num_lots, lot_size=lot_size)
+            cum_trades += len(trades)
+            cum_wins += sum(1 for t in trades if t["result"] == "WIN")
+            cum_stops += sum(1 for t in trades if t["result"] == "STOP")
+            cum_pnl += sum(t["pnl"] for t in trades)
+
+        cum_rate = (cum_caught + cum_stalked) / cum_swings * 100 if cum_swings > 0 else 0
+
+        print(f"\n  CUMULATIVE ({day_count} days)")
+        print(f"  Swings: {cum_swings}  |  Caught: {cum_caught}  |  "
+              f"Stalked: {cum_stalked}  |  Missed: {cum_missed}  |  Rate: {cum_rate:.0f}%")
+        print(f"  Trades: {cum_trades}  |  Wins: {cum_wins}  |  Stops: {cum_stops}")
+        print(f"  P&L: Rs {cum_pnl:+,.0f}")
+        if cum_trades > 0:
+            print(f"  Win rate: {cum_wins/cum_trades*100:.0f}%  |  Avg P&L/trade: Rs {cum_pnl/cum_trades:+,.0f}")
+
+    print(f"{'='*70}\n")
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python backtest_from_oi.py [--min-pts N] <options_log_csv> [...]")

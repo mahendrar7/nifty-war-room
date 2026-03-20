@@ -1225,6 +1225,19 @@ def run_logger():
                     print("✅ ML retrained")
                 except Exception as e:
                     print(f"⚠ ML retrain failed: {e}")
+
+            # Daily sniper backtest report
+            try:
+                from backtest_from_oi import run_daily_report
+                run_daily_report(
+                    instrument=_instrument_arg.lower(),
+                    min_pts=50,
+                    num_lots=2,
+                    lot_size=PROFILE["lot_size"],
+                )
+            except Exception as e:
+                print(f"⚠ Daily backtest report failed: {e}")
+
             print("State reset. Waiting for next market open...")
             time.sleep(60)
             continue
