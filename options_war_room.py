@@ -29,7 +29,32 @@
 #   - Meta+T hotkey: log trade entry from last suggestion or manual input
 #   - Meta+X hotkey: manually exit active trade
 #   - Minimal terminal layout: actionable data only, all verbose reasons → debug
-#==============================================================================
+#
+# TODO — SNIPER IMPROVEMENTS (post 20-Mar-2026 review)
+# -------------------------------------------------------
+#   1. RANGE BIAS DOUBLE-BLOCK — FIXED
+#      Removed "RANGE — SIT OUT" hard block. Only the -0.5 score
+#      penalty remains (sniper_display.py line ~693).
+#
+#   2. FIX MOVE PROBABILITY METER (MPM) — FIXED
+#      Added trend as MPM input signal (weight 18, scaled by move size).
+#      MPM now fires on price-action trends even when OI signals are silent.
+#
+#   3. VACUUM DETECTION TOO CONSERVATIVE
+#      OI_DESERT_THRESHOLD = 0.10 requires a strike to have < 10% of
+#      chain max OI. On liquid expiries with high base OI, this may
+#      never trigger even when there's clearly no resistance ahead.
+#      Consider a relative threshold (vs nearby strikes) instead of
+#      absolute chain-max comparison.
+#      File: detectors.py, detect_liquidity_vacuum()
+#
+#   4. PER-SETUP WIN RATE TRACKING
+#      After 30+ trades with the new thresholds, log which setup type
+#      produced TAKE TRADE / SEND IT. Compute win rate per setup.
+#      Use this to add a setup_reliability multiplier to the score.
+#      File: sniper_display.py
+#
+# ==============================================================================
 # This file is intentionally thin. All domain logic lives in:
 #
 #   config.py          — all constants and thresholds
@@ -397,6 +422,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
             gamma=gamma, momentum_data=momentum_data, velocity=velocity,
             vacuum=vacuum, wall_break=wall_break_vac, flip_breakout=flip_breakout,
             acceleration=liq_accel, momentum_strikes=momentum_strikes,
+            trend=trend,
         )
         cache_result("move_prob", move_prob)
     else:

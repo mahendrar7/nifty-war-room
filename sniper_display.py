@@ -60,6 +60,8 @@ TODO
 """
 
 from colorama import Fore, Style
+from config import (CHOP_KILLER_GAMMA_MIN, SNIPER_TAKE_TRADE,
+                    SNIPER_SEND_IT, SNIPER_STALK)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -165,13 +167,14 @@ def sniper_notify(notify_fn, action, message):
 # Max possible = 10. You need 6+ to fire.
 
 W = {
-    "gamma_structure":   1.75,  # gamma sign + flip proximity + wall proximity
-    "straddle_momentum": 1.5,   # straddle expanding = fuel for the move
-    "spot_vs_walls":     1.75,  # near wall = setup, mid-range = noise
-    "oi_velocity":       1.5,   # OI SURGE = real flow, not just noise
+    "gamma_structure":   1.5,   # gamma sign + flip proximity + wall proximity
+    "straddle_momentum": 1.25,  # straddle expanding = fuel for the move
+    "spot_vs_walls":     1.5,   # near wall = setup, mid-range = noise
+    "oi_velocity":       1.25,  # OI SURGE = real flow, not just noise
     "iv_premium":        0.5,   # REDUCED — overlaps with straddle & MPM
-    "move_prob":         1.5,   # your existing MPM — already synthesised
+    "move_prob":         1.0,   # your existing MPM — already synthesised
     "structural_event":  1.5,   # vacuum / flip breakout / liq accel / squeeze
+    "trend":             1.5,   # price-action trend — fallback when OI signals lag
 }
 # Sum = 10.0
 
@@ -369,8 +372,10 @@ def _score_move_prob(move_prob):
         score = 0.7
     elif prob >= 60:
         score = 0.5
-    elif prob >= 50:
+    elif prob >= 40:
         score = 0.3
+    elif prob >= 30:
+        score = 0.15
 
     # Conviction bonus
     if conv == "VERY HIGH":
@@ -415,6 +420,48 @@ def _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze)
     # Squeeze
     if squeeze:
         score = max(score, 0.8)
+
+    return min(1.0, score)
+
+
+def _score_trend(trend):
+    """
+    Pure price-action trend score — fallback when OI-derived signals lag.
+    Uses detect_persistent_trend() output.
+    """
+    if not trend or not trend.get("trending"):
+        return 0.0
+
+    pts = trend.get("move_pts", 0)
+    duration = trend.get("duration_minutes", 0)
+
+    score = 0.0
+
+    # Move magnitude
+    if pts >= 80:
+        score += 0.5
+    elif pts >= 50:
+        score += 0.35
+    elif pts >= 30:
+        score += 0.2
+
+    # Duration — sustained trend is more reliable
+    if duration >= 20:
+        score += 0.3
+    elif duration >= 10:
+        score += 0.2
+    elif duration >= 5:
+        score += 0.1
+
+    # Speed (pts per minute) — fast moves = momentum
+    if duration > 0:
+        speed = pts / duration
+        if speed >= 5:
+            score += 0.3     # 5+ pts/min = very fast
+        elif speed >= 2:
+            score += 0.2
+        elif speed >= 1:
+            score += 0.1
 
     return min(1.0, score)
 
@@ -530,7 +577,7 @@ def _resolve_direction(bias, move_prob, flip_breakout, vacuum,
 
 def _decide_action(total_score, setup, confidence, trap, bias, days_to_expiry,
                    regime=None, active_trade=None, direction=None,
-                   is_locked=False, lock_reason=None):
+                   is_locked=False, lock_reason=None, gamma=0):
     """
     Returns (action_text, action_color, action_icon).
     """
@@ -543,35 +590,32 @@ def _decide_action(total_score, setup, confidence, trap, bias, days_to_expiry,
         return f"LOCKED{reason_tag}", Fore.CYAN, "🔒"
 
     # ── Fix 2: Chop killer — hard block on chop regimes ──────────────
-    chop_regimes = ("CHOP", "GAMMA PINNING", "RANGE LOCK")
-    if regime and any(r in regime.upper() for r in chop_regimes):
-        if total_score < 7:
+    # Only block when gamma is meaningfully positive (strong pin), not barely > 0
+    chop_regimes = ("CHOP", "RANGE LOCK")
+    gamma_pinning_strong = "GAMMA PINNING" in (regime or "").upper() and gamma > CHOP_KILLER_GAMMA_MIN
+    if regime and (any(r in regime.upper() for r in chop_regimes) or gamma_pinning_strong):
+        if total_score < SNIPER_TAKE_TRADE:
             return "CHOP — NO TRADE", Fore.RED, "🧱"
 
     # Hard blocks
-    if total_score < 4:
+    if total_score < 3:
         return "STAND DOWN", Fore.RED, "🚫"
-    if setup == "DEVELOPING" and total_score < 7:
+    if setup == "DEVELOPING" and total_score < SNIPER_TAKE_TRADE:
         return "NO EDGE — WAIT", Fore.RED, "🚫"
-    if bias == "RANGE" and total_score < 7 and setup not in (
-        "TRAP FADE", "FLIP BREAKOUT", "VACUUM DRIVE", "WALL BREAK",
-        "LIQ ACCELERATION", "GAMMA SQUEEZE"
-    ):
-        return "RANGE — SIT OUT", Fore.YELLOW, "⏸ "
 
-    # Trap warning (but don't block structural setups)
+    # Trap warning (but don't block structural setups or trends)
     if trap_conf >= 80 and setup not in (
         "TRAP FADE", "FLIP BREAKOUT", "VACUUM DRIVE",
-        "LIQ ACCELERATION", "GAMMA SQUEEZE"
+        "LIQ ACCELERATION", "GAMMA SQUEEZE", "TREND CONTINUATION"
     ):
         return "TRAP RISK — SKIP", Fore.RED, "🪤"
 
-    # ── Fix 5: Tighter thresholds ────────────────────────────────────
-    if total_score >= 8.5:
+    # ── Thresholds ────────────────────────────────────────────────────
+    if total_score >= SNIPER_SEND_IT:
         return "SEND IT", Fore.GREEN, "🎯"
-    if total_score >= 7:
+    if total_score >= SNIPER_TAKE_TRADE:
         return "TAKE TRADE", Fore.GREEN, "👉"
-    if total_score >= 5.5:
+    if total_score >= SNIPER_STALK:
         return "STALK — WAIT FOR TRIGGER", Fore.YELLOW, "👁 "
 
     return "WAIT", Fore.YELLOW, "⏸ "
@@ -582,11 +626,11 @@ def _decide_action(total_score, setup, confidence, trap, bias, days_to_expiry,
 # ─────────────────────────────────────────────────────────────
 
 def _conf_label(score):
-    if score >= 8:
+    if score >= SNIPER_SEND_IT:
         return "VERY HIGH", Fore.GREEN
-    if score >= 6:
+    if score >= SNIPER_TAKE_TRADE:
         return "HIGH", Fore.GREEN
-    if score >= 4:
+    if score >= SNIPER_STALK:
         return "MEDIUM", Fore.YELLOW
     return "LOW", Fore.RED
 
@@ -629,6 +673,7 @@ def sniper_display(
         "iv_premium":        _score_iv(momentum_data, straddle, days_to_expiry),
         "move_prob":         _score_move_prob(move_prob),
         "structural_event":  _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze),
+        "trend":             _score_trend(trend),
     }
 
     # Weighted total (0-10)
@@ -661,23 +706,23 @@ def sniper_display(
     action_text, action_color, action_icon = _decide_action(
         total, setup, confidence, trap, bias, days_to_expiry,
         regime=regime, active_trade=active_trade, direction=direction,
-        is_locked=is_locked, lock_reason=lock_reason,
+        is_locked=is_locked, lock_reason=lock_reason, gamma=gamma,
     )
 
     # ── Score bar ──────────────────────────────────────────────
     filled = total_int
     empty = 10 - filled
-    if total >= 7:
+    if total >= SNIPER_TAKE_TRADE:
         bar_color = Fore.GREEN
-    elif total >= 4:
+    elif total >= SNIPER_STALK:
         bar_color = Fore.YELLOW
     else:
         bar_color = Fore.RED
 
     score_check = ""
-    if total >= 7:
+    if total >= SNIPER_TAKE_TRADE:
         score_check = f" {Fore.GREEN}✅{Style.RESET_ALL}"
-    elif total >= 5:
+    elif total >= SNIPER_STALK:
         score_check = f" {Fore.YELLOW}⚠️{Style.RESET_ALL}"
     else:
         score_check = f" {Fore.RED}❌{Style.RESET_ALL}"
@@ -710,6 +755,7 @@ def sniper_display(
             "iv_premium":        "IV",
             "move_prob":         "MPM",
             "structural_event":  "Evt",
+            "trend":             "Trd",
         }
         for key in scores:
             raw = scores[key]

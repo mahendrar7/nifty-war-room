@@ -806,7 +806,7 @@ def hold_the_line(gamma, momentum_data, next_wall_distance,
 
 def compute_move_probability(gamma, momentum_data, velocity, vacuum,
                               wall_break, flip_breakout, acceleration,
-                              momentum_strikes):
+                              momentum_strikes, trend=None):
     result = {
         "probability": 0, "direction": "UNCLEAR", "conviction": "LOW",
         "active_signals": [], "reasons": [], "conflicted": False,
@@ -855,6 +855,20 @@ def compute_move_probability(gamma, momentum_data, velocity, vacuum,
     if momentum_strikes:
         signals.append(("momentum_strike", MPM_WEIGHTS["momentum_strike"], None))
         reasons.append(f"Momentum at {len(momentum_strikes)} strike(s) (+{MPM_WEIGHTS['momentum_strike']})")
+
+    if trend and trend.get("trending"):
+        trend_dir = "UPSIDE" if trend["direction"] == "UP" else "DOWNSIDE"
+        trend_pts = trend.get("move_pts", 0)
+        trend_weight = MPM_WEIGHTS["trend"]
+        # Scale weight by move magnitude — 80+ pts gets full weight, 30pts gets half
+        if trend_pts >= 80:
+            scaled = trend_weight
+        elif trend_pts >= 50:
+            scaled = int(trend_weight * 0.75)
+        else:
+            scaled = int(trend_weight * 0.5)
+        signals.append(("trend", scaled, trend_dir))
+        reasons.append(f"Price trend {trend_dir} {trend_pts}pts (+{scaled})")
 
     if not signals:
         return result

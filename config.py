@@ -84,18 +84,18 @@ EXPIRY_RISK_SCALAR = {0: 0.50, 1: 0.70, 2: 0.85}
 # DETECTOR THRESHOLDS
 # -----------------------------
 GAMMA_FLIP_DANGER_ZONE  = 20     # pts — danger zone around flip level
-FLIP_BREAKOUT_PROXIMITY = 10     # pts — how close to flip before watching for cross
-FLIP_BREAKOUT_IV_MIN    = 2.0    # % straddle momentum needed to confirm breakout
+FLIP_BREAKOUT_PROXIMITY = 25     # pts — how close to flip before watching for cross
+FLIP_BREAKOUT_IV_MIN    = 0.5    # % straddle momentum needed to confirm breakout
 OI_DESERT_THRESHOLD     = 0.10   # strike OI < 10% of chain max = desert
 WALL_DISSOLVE_RATE      = 0.30   # wall lost >30% OI = dissolving
 VACUUM_MIN_WIDTH        = 50     # desert must span ≥ 50pts
 WALL_BREAK_OI_DROP      = 0.25   # 25% OI loss = wall breaking
 
-ACCEL_PRICE_SPEED_MIN   = 3.0    # pts per candle minimum for acceleration
-ACCEL_PRICE_SPEED_HIGH  = 10.0   # pts per candle = high conviction
-ACCEL_IV_MIN            = 2.0    # % straddle momentum minimum
-ACCEL_IV_HIGH           = 4.0    # % straddle momentum = high conviction
-ACCEL_SCORE_THRESHOLD   = 60     # minimum score to report acceleration
+ACCEL_PRICE_SPEED_MIN   = 1.5    # pts per candle minimum for acceleration
+ACCEL_PRICE_SPEED_HIGH  = 6.0    # pts per candle = high conviction
+ACCEL_IV_MIN            = 0.8    # % straddle momentum minimum
+ACCEL_IV_HIGH           = 2.5    # % straddle momentum = high conviction
+ACCEL_SCORE_THRESHOLD   = 40     # minimum score to report acceleration
 
 HTL_IV_HOLD_MIN    =  1.0   # straddle momentum floor for HOLD
 HTL_IV_EXIT_MIN    = -1.0   # straddle momentum floor — below = EXIT
@@ -108,6 +108,7 @@ MPM_WEIGHTS = {
     "liq_accel":       25,
     "vacuum":          20,
     "wall_break":      20,
+    "trend":           18,   # price-action trend — fires when OI signals lag
     "iv_expansion":    12,
     "oi_surge":        12,
     "momentum_strike":  6,
@@ -120,9 +121,17 @@ MPM_CONFLICT_PEN = 0.75
 # TREND DETECTION
 # -----------------------------
 TREND_WINDOW_MINUTES  = 30     # look back this far to detect persistent trends
-TREND_MIN_MOVE_MULT   = 1.0   # must move ≥ 1× expected move to qualify
+TREND_MIN_MOVE_MULT   = 0.3   # must move ≥ 0.3× expected move to qualify (~70pts)
 TREND_TRAP_SUPPRESS   = 0.40  # suppress trap confidence to 40% in trends
 TREND_BIAS_BOOST      = 30    # add this to directional confidence in trends
+
+# -----------------------------
+# SNIPER TUNING
+# -----------------------------
+CHOP_KILLER_GAMMA_MIN = 5e13   # only apply chop killer when gamma > this (strong pin)
+SNIPER_TAKE_TRADE     = 5.5    # score threshold for TAKE TRADE (was 7.0)
+SNIPER_SEND_IT        = 7.0    # score threshold for SEND IT (was 8.5)
+SNIPER_STALK          = 4.0    # score threshold for STALK (was 5.5)
 
 # -----------------------------
 # WALL RETREAT DETECTION
