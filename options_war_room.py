@@ -20,11 +20,7 @@
 #   - OI Velocity SURGE overrides RANGE bias → TREND FOLLOW action
 #   - Trap confidence *= 0.4 when gamma < 0 — suppresses false traps in squeezes
 #   - Wall Break Vacuum: OI drop >25% + spot crosses strike → 🌪 LIQUIDITY VACUUM
-#   - suggest_trade() — four independent trade paths:
-#       Path 1: directional bias
-#       Path 2: trap fade (works even when bias == RANGE, gamma >= 0 guard)
-#       Path 3: gamma flip breakout
-#       Path 4: liquidity acceleration
+#   - Sniper decides direction → suggest_trade() computes strike, sizing, stop/target
 #   - Gamma pinning regime uses gamma sign directly, not flip event
 #   - Regime tracker bypass for structural events (no 3-candle delay)
 #   - Liquidity acceleration detector: price + IV + OI all firing = launch phase
@@ -120,7 +116,7 @@ from datetime import datetime, timedelta
 
 from colorama import Fore, Style, init
 from notifier import send_telegram_message
-from sniper_display import sniper_display
+from sniper_display import sniper_display, sniper_notify
 
 # =============================================================================
 # AUTO-CAFFEINATE — prevent macOS sleep while war room is running
@@ -711,41 +707,6 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
 
     print(Fore.GREEN + f"ACTION: {action}" + Style.RESET_ALL)
 
-    trade = suggest_trade(
-        spot=spot, straddle=straddle, bias=bias, df=df, gamma=gamma,
-        flip_level=flip_level, regime=regime, confidence=confidence,
-        trap=trap, ml_signal=ml_signal, days_to_expiry=days_to_expiry,
-        flip_breakout=flip_breakout, velocity=velocity, liq_accel=liq_accel,
-        trend=trend,
-    )
-
-    if trade:
-        state.last_suggestion = trade
-        label = {
-            "directional": "💡",
-            "trap_fade": "🪤",
-            "flip_breakout": "⚡",
-            "liq_accel": "🚀",
-        }.get(trade.get("trade_type"), "💡")
-        t = trade
-        print(f"{label} {t['strike']} {t['option_type']}  "
-              f"₹{t['price']:.0f}  ×{t['lots']}lot  "
-              f"Stop:₹{t['stop']:.0f}  Target:₹{t['target']:.0f}  "
-              f"Risk:₹{t['risk']:,.0f}")
-        print(f"  {Fore.WHITE}Meta+I / Ctrl+T → log entry  │  Meta+X / Ctrl+X → exit{Style.RESET_ALL}")
-    else:
-        no_trade_reason = "STAY OUT"
-        if bias == "RANGE" and (not trap or trap["confidence"] < 60) \
-                and (not flip_breakout or not flip_breakout["detected"]):
-            no_trade_reason = "RANGE — no structural signal"
-        elif _get_regime_risk(regime) == 0:
-            no_trade_reason = f"Regime '{regime}' — risk budget zero"
-        elif trap_prob >= 80 and gamma < 0:
-            no_trade_reason = f"{trap['type']} suppressed (neg gamma)"
-        elif trap_prob >= 80:
-            no_trade_reason = f"{trap['type']} {trap_prob}% — standing aside"
-        print(Fore.YELLOW + f"💡 {no_trade_reason}" + Style.RESET_ALL)
-
     # ML
     if state.last_ml_result is not None:
         lr = state.last_ml_result
@@ -828,8 +789,8 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
               f"₹{ls['price']:.0f} — not logged, press Meta+I to enter)"
               + Style.RESET_ALL)
 
-    # SNIPER DISPLAY
-    sniper_display(
+    # SNIPER — decides WHETHER to trade and DIRECTION
+    sniper_result = sniper_display(
         spot=spot, bias=bias, confidence=confidence,
         gamma=gamma, straddle=straddle, momentum_data=momentum_data,
         move_prob=move_prob, trap=trap, velocity=velocity,
@@ -838,10 +799,68 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         squeeze=squeeze, trend=trend,
         call_wall=call_wall, put_wall=put_wall,
         flip_level=flip_level, regime=regime,
-        trade=trade, days_to_expiry=days_to_expiry,
+        trade=None, days_to_expiry=days_to_expiry,
         call_oi_speed=call_oi_speed, put_oi_speed=put_oi_speed,
-        gamma_shift=gamma_shift,notify_fn=notify,debug=DEBUG_MODE
+        gamma_shift=gamma_shift, notify_fn=None, debug=DEBUG_MODE
     )
+
+    # TRADE SUGGESTION — only when sniper endorses
+    trade = None
+    sniper_action = sniper_result.get("action", "") if sniper_result else ""
+
+    if sniper_action in ("TAKE TRADE", "SEND IT") and state.active_trade is None:
+        sniper_dir = sniper_result["direction"]   # "LONG" or "SHORT"
+        trade_direction = "CALL" if sniper_dir == "LONG" else "PUT"
+        trade = suggest_trade(
+            spot=spot, straddle=straddle, direction=trade_direction,
+            df=df, gamma=gamma, flip_level=flip_level,
+            regime=regime, confidence=confidence,
+            ml_signal=ml_signal, days_to_expiry=days_to_expiry,
+            sniper_setup=sniper_result.get("setup"),
+        )
+
+    if trade:
+        t = trade
+        print(f"💡 {t['strike']} {t['option_type']}  "
+              f"₹{t['price']:.0f}  ×{t['lots']}lot  "
+              f"Stop:₹{t['stop']:.0f}  Target:₹{t['target']:.0f}  "
+              f"Risk:₹{t['risk']:,.0f}")
+        print(f"  {Fore.WHITE}Meta+I / Ctrl+T → log entry  │  Meta+X / Ctrl+X → exit{Style.RESET_ALL}")
+        state.last_suggestion = trade
+
+        # Telegram with full trade details
+        icon = "🎯🎯🎯" if sniper_action == "SEND IT" else "🎯"
+        sniper_notify(
+            notify,
+            action=sniper_action,
+            message=(
+                f"{icon} SNIPER {sniper_action} | "
+                f"{sniper_result['setup']} {sniper_result['direction']} | "
+                f"Score:{int(round(sniper_result['score']))}/10 ({sniper_result['confidence']}) | "
+                f"Spot:{spot} | "
+                f"💡 {t['strike']} {t['option_type']} "
+                f"₹{t['price']:.0f} ×{t['lots']} "
+                f"Stop:₹{t['stop']:.0f} Target:₹{t['target']:.0f}"
+            ),
+        )
+    elif sniper_action in ("TAKE TRADE", "SEND IT"):
+        # Sniper endorsed but no viable strike/sizing — still alert
+        icon = "🎯🎯🎯" if sniper_action == "SEND IT" else "🎯"
+        sniper_notify(
+            notify,
+            action=sniper_action,
+            message=(
+                f"{icon} SNIPER {sniper_action} | "
+                f"{sniper_result['setup']} {sniper_result['direction']} | "
+                f"Score:{int(round(sniper_result['score']))}/10 ({sniper_result['confidence']}) | "
+                f"Spot:{spot} | ⚠ no viable strike"
+            ),
+        )
+
+    # Clear last_suggestion when sniper rejects (but keep during STALK/LOCKED)
+    if sniper_action not in ("TAKE TRADE", "SEND IT", "STALK — WAIT FOR TRIGGER", "LOCKED") \
+            and state.active_trade is None:
+        state.last_suggestion = None
 
     print("=" * 63)
 

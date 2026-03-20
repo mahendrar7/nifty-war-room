@@ -140,7 +140,7 @@ _sniper_lock = SniperLock()
 _last_sniper_alert = None   # tracks "TAKE TRADE|BREAKOUT|LONG" to avoid repeat
 
 
-def _sniper_notify(notify_fn, action, message):
+def sniper_notify(notify_fn, action, message):
     """
     Send Telegram only if this is a NEW signal.
     Same action + setup + direction = don't re-send every tick.
@@ -693,26 +693,9 @@ def sniper_display(
     print(f"{action_icon}  {action_color}{Style.BRIGHT}{action_text}{Style.RESET_ALL}")
     print(Fore.CYAN + f"{'─' * 63}" + Style.RESET_ALL)
 
-    # ── Telegram alert for high-conviction signals ─────────────
-    if notify_fn and action_text in ("TAKE TRADE", "SEND IT"):
-        # Build trade context for the alert
-        trade_str = ""
-        if trade:
-            trade_str = (f" | 💡 {trade['strike']} {trade['option_type']}"
-                         f" ₹{trade['price']:.0f} ×{trade['lots']}")
-
-        icon = "🎯🎯🎯" if action_text == "SEND IT" else "🎯"
-        _sniper_notify(
-            notify_fn,
-            action=action_text,
-            message=(
-                f"{icon} SNIPER {action_text} | {setup} {direction} | "
-                f"Score:{total_int}/10 ({conf_text}) | "
-                f"Spot:{spot}{trade_str}"
-            ),
-        )
-    elif action_text not in ("TAKE TRADE", "SEND IT"):
-        # Reset alert key so next TAKE TRADE / SEND IT fires fresh
+    # Reset alert key when action changes so next TAKE TRADE / SEND IT fires fresh
+    # Telegram is now sent by the war room after computing trade details
+    if action_text not in ("TAKE TRADE", "SEND IT"):
         global _last_sniper_alert
         _last_sniper_alert = None
 

@@ -167,79 +167,23 @@ def compute_position_size(option_price, regime, confidence,
 
 
 # =============================================================================
-# SUGGEST TRADE — four paths
+# SUGGEST TRADE — sniper decides direction, this computes the numbers
 # =============================================================================
 
-def suggest_trade(spot, straddle, bias, df, gamma, flip_level,
-                  regime, confidence, trap, ml_signal, days_to_expiry,
-                  flip_breakout=None, velocity=None, liq_accel=None,
-                  trend=None):
+def suggest_trade(spot, straddle, direction, df, gamma, flip_level,
+                  regime, confidence, ml_signal, days_to_expiry,
+                  sniper_setup=None):
     """
-    Four independent paths to a trade — REORDERED (v2):
-      1. Directional bias
-      2. Gamma flip breakout        (was path 3 — promoted)
-      3. Liquidity acceleration     (was path 4 — promoted)
-      4. Trap fade                  (was path 2 — demoted)
+    Compute trade mechanics for a sniper-endorsed direction.
 
-    FIX: Structural signals (flip breakout, acceleration) now take priority
-    over trap fades. Previously, a 60% trap would block a 70-score
-    acceleration from generating a trade.
+    Sniper decides WHETHER to trade and the DIRECTION.
+    This function computes WHAT to trade: strike, price, lots, stop, target.
 
-    FIX: Trend-aware directional boost — if a persistent trend is detected
-    in the same direction as bias, confidence is boosted and the directional
-    path can fire even when the regime tracker hasn't confirmed yet.
+    Args:
+        direction: "CALL" or "PUT" (mapped from sniper's LONG/SHORT)
+        sniper_setup: setup name from sniper for reasoning display
     """
-    from config import TREND_BIAS_BOOST
-
     expected_move = straddle / 2
-    trap_conf     = trap["confidence"] if trap else 0
-    trade_type    = None
-    direction     = None
-
-    # Trend-boosted confidence for directional path
-    effective_confidence = confidence
-    effective_bias       = bias
-    if trend and trend["trending"]:
-        if trend["direction"] == "UP" and bias in ("BULLISH", "RANGE"):
-            effective_confidence = min(confidence + TREND_BIAS_BOOST, 100)
-            effective_bias = "BULLISH"
-        elif trend["direction"] == "DOWN" and bias in ("BEARISH", "RANGE"):
-            effective_confidence = min(confidence + TREND_BIAS_BOOST, 100)
-            effective_bias = "BEARISH"
-
-    # Path 1: Directional bias
-    if effective_bias in ("BULLISH", "BEARISH") and _get_regime_risk(regime) > 0:
-        if trap_conf < 80:
-            direction, trade_type = ("CALL" if effective_bias == "BULLISH" else "PUT"), "directional"
-
-    # Path 2: Gamma flip breakout (PROMOTED from path 3)
-    if direction is None and flip_breakout and flip_breakout["detected"]:
-        direction  = "CALL" if flip_breakout["direction"] == "UPSIDE" else "PUT"
-        trade_type = "flip_breakout"
-
-    # Path 3: Liquidity acceleration (PROMOTED from path 4)
-    if direction is None and liq_accel and liq_accel["detected"]:
-        direction  = "CALL" if liq_accel["direction"] == "UPSIDE" else "PUT"
-        trade_type = "liq_accel"
-
-    # Path 4: Trap fade (DEMOTED from path 2)
-    if direction is None and trap_conf >= 60 and gamma >= 0:
-        # Additional guard: don't fade into a persistent trend
-        trend_blocks = False
-        if trend and trend["trending"]:
-            if (trap["type"] == "BULL TRAP" and trend["direction"] == "UP") or \
-               (trap["type"] == "BEAR TRAP" and trend["direction"] == "DOWN"):
-                trend_blocks = True
-        if not trend_blocks:
-            if trap["type"] == "BULL TRAP":
-                direction, trade_type = "PUT", "trap_fade"
-            elif trap["type"] == "BEAR TRAP":
-                direction, trade_type = "CALL", "trap_fade"
-
-    if direction is None:
-        return None
-    if trade_type == "directional" and _get_regime_risk(regime) == 0:
-        return None
 
     strike = choose_otm_strike(spot, expected_move, direction, gamma, flip_level, regime)
 
@@ -254,13 +198,11 @@ def suggest_trade(spot, straddle, bias, df, gamma, flip_level,
     if price <= 0:
         return None
 
-    effective_regime = regime if trade_type == "directional" else "BREAKOUT PRESSURE"
-
     lots = compute_position_size(
         option_price    = price,
-        regime          = effective_regime,
-        confidence      = effective_confidence if trade_type == "directional" else max(trap_conf, 50),
-        trap_confidence = 0 if trade_type == "trap_fade" else trap_conf,
+        regime          = regime,
+        confidence      = confidence,
+        trap_confidence = 0,   # sniper already factored trap into its score
         ml_signal       = ml_signal,
         days_to_expiry  = days_to_expiry,
     )
@@ -276,32 +218,13 @@ def suggest_trade(spot, straddle, bias, df, gamma, flip_level,
     capital    = round(price * LOT_SIZE * lots, 2)
 
     reasoning = []
-    if trade_type == "directional":
-        reasoning.append(
-            f"Regime: {regime} → risk {_get_regime_risk(regime)*100:.1f}% "
-            f"× expiry scalar {risk_scalar:.2f}"
-        )
-        reasoning.append(f"Confidence {confidence}% applied as scalar")
-        if trap_conf >= 40:
-            reasoning.append(f"Trap penalty ({trap_conf}% active)")
-    elif trade_type == "trap_fade":
-        reasoning.append(
-            f"Trap fade: {trap['type']} {trap_conf}% — "
-            f"fading {'rally' if trap['type'] == 'BULL TRAP' else 'selloff'}"
-        )
-        reasoning.append("Gamma ≥ 0 — dealer resistance valid")
-    elif trade_type == "flip_breakout":
-        reasoning.append(
-            f"Gamma flip breakout: crossed {flip_breakout['flip_level']} "
-            f"{flip_breakout['direction'].lower()}"
-        )
-        reasoning.append("IV expanding — institutional confirmation")
-    elif trade_type == "liq_accel":
-        reasoning.append(
-            f"Liquidity acceleration {liq_accel['direction']} "
-            f"score:{liq_accel['score']} [{liq_accel['conviction']}]"
-        )
-
+    if sniper_setup:
+        reasoning.append(f"Sniper setup: {sniper_setup}")
+    reasoning.append(
+        f"Regime: {regime} → risk {_get_regime_risk(regime)*100:.1f}% "
+        f"× expiry scalar {risk_scalar:.2f}"
+    )
+    reasoning.append(f"Confidence {confidence}% applied as scalar")
     reasoning.append(
         f"Strike {abs(strike-spot):.0f}pts OTM = {otm_pct}% of ±{expected_move:.0f}pt move"
     )
