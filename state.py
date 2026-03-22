@@ -91,6 +91,9 @@ class MarketState:
         # NEW: gamma history for momentum / rate-of-change tracking
         self.gamma_history       = deque(maxlen=10)  # last 10 candles
 
+        # NEW: heavyweight stock price history for ROC tracking
+        self.hw_history          = deque(maxlen=60)   # last 60 minutes of price snapshots
+
         # NEW: throttle cache for slow-compute signals
         self.throttle_cache      = {}   # {"signal_name": {"tick": N, "result": ...}}
         self.tick_counter        = 0    # incremented every main loop iteration
@@ -121,6 +124,7 @@ class MarketState:
         self.call_wall_history.clear()
         self.put_wall_history.clear()
         self.spot_history.clear()
+        self.hw_history.clear()
         self.throttle_cache.clear()
         self.tick_counter        = 0
         # ml_consecutive_wrong intentionally not reset — ML reliability persists across sessions

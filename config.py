@@ -103,6 +103,17 @@ HTL_WALL_TRAIL_PTS =  60    # pts to next wall — start trailing
 HTL_WALL_EXIT_PTS  =  25    # pts to next wall — exit
 HTL_GAMMA_TRAIL    =  0.0   # gamma at zero = start trailing
 
+# HEAVYWEIGHT MOMENTUM (for HTL)
+HW_ROC_WINDOW        = 15    # candles — broad ROC: is there a real move?
+HW_ROC_WINDOW_FAST   = 5     # candles — fast ROC: is the move dying? (used in-trade)
+HW_STALL_WINDOW      = 2     # candles — very short ROC to detect flatline
+HW_STALL_RATIO       = 0.25  # if short ROC < 25% of broad ROC → stalled
+HW_STRONG_THRESHOLD  = 0.15  # weighted ROC ≥ 0.15% = strong move
+HW_WEAK_THRESHOLD    = 0.05  # weighted ROC ≥ 0.05% = moderate move
+HW_EXHAUSTION_DEDUCT = 25    # HTL deduction when heavyweights decelerate
+HW_AGAINST_DEDUCT    = 30    # HTL deduction when heavyweights move against trade
+HW_STALL_DEDUCT      = 20    # HTL deduction when heavyweights stall after a move
+
 MPM_WEIGHTS = {
     "flip_breakout":   30,
     "liq_accel":       25,

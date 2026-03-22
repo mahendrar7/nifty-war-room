@@ -15,6 +15,7 @@ from config import (
     ACCEL_IV_HIGH, ACCEL_SCORE_THRESHOLD,
     HTL_IV_HOLD_MIN, HTL_IV_EXIT_MIN, HTL_WALL_TRAIL_PTS,
     HTL_WALL_EXIT_PTS, HTL_GAMMA_TRAIL,
+    HW_EXHAUSTION_DEDUCT, HW_AGAINST_DEDUCT, HW_STALL_DEDUCT,
     MPM_WEIGHTS, MPM_GAMMA_AMP, MPM_GAMMA_DAMP, MPM_CONFLICT_PEN,
 )
 from state import state
@@ -712,11 +713,13 @@ def compute_next_wall_distance(df, spot, trade_direction):
 
 
 def hold_the_line(gamma, momentum_data, next_wall_distance,
-                  trade_direction, oi_signal, prev_gamma=None):
+                  trade_direction, oi_signal, prev_gamma=None,
+                  hw_momentum=None, hw_roc_trend=None, hw_stall=None):
     result = {
         "verdict": "HOLD", "hold_score": 100,
         "exit_reasons": [], "trail_reasons": [], "hold_reasons": [],
         "stop_suggestion": "ORIGINAL",
+        "hw_summary": None,
     }
 
     if momentum_data is None:
@@ -756,6 +759,65 @@ def hold_the_line(gamma, momentum_data, next_wall_distance,
         if "Put Writing" in oi_signal and "Call Unwinding" in oi_signal:
             exit_flags.append("Put writers re-entering — smart money fading the move")
             deductions += 30
+
+    # ── HEAVYWEIGHT MOMENTUM ────────────────────────────────────────
+    if hw_momentum is not None:
+        hw_dir   = hw_momentum["direction"]
+        hw_roc   = hw_momentum["weighted_roc"]
+        hw_str   = hw_momentum["strength"]
+        top_mover = hw_momentum["movers"][0] if hw_momentum["movers"] else None
+        top_str   = f" ({top_mover['name']} {top_mover['roc']:+.2f}%)" if top_mover else ""
+
+        # Map trade direction to expected heavyweight direction
+        trade_bullish = trade_direction in ("CALL", "CE")
+        hw_aligned = (trade_bullish and hw_dir == "BULLISH") or \
+                     (not trade_bullish and hw_dir == "BEARISH")
+        hw_against = (trade_bullish and hw_dir == "BEARISH") or \
+                     (not trade_bullish and hw_dir == "BULLISH")
+
+        if hw_against and hw_str in ("STRONG", "MODERATE"):
+            exit_flags.append(
+                f"Heavyweights moving AGAINST trade ({hw_roc:+.2f}%){top_str}"
+            )
+            deductions += HW_AGAINST_DEDUCT
+
+        if hw_roc_trend == "DECELERATING" and not hw_against:
+            trail_flags.append(
+                f"Heavyweight ROC decelerating — move exhaustion{top_str}"
+            )
+            deductions += HW_EXHAUSTION_DEDUCT
+
+        aw = hw_momentum["aligned_weight"]
+        ac = hw_momentum["aligned_count"]
+
+        if hw_aligned and hw_str == "STRONG":
+            hold_flags.append(
+                f"Heavyweights driving move ({hw_roc:+.2f}%, "
+                f"{ac}/10 aligned, {aw:.0f}% weight){top_str}"
+            )
+        elif hw_aligned and hw_str == "MODERATE":
+            hold_flags.append(
+                f"Heavyweights supporting ({hw_roc:+.2f}%, "
+                f"{aw:.0f}% weight){top_str}"
+            )
+        elif hw_dir == "FLAT":
+            trail_flags.append("Heavyweights flat — no conviction from stocks")
+            deductions += 10
+
+        # ── Stall detection: broad move happened but current velocity is zero ──
+        if hw_stall is not None and hw_stall["stalled"]:
+            trail_flags.append(
+                f"Heavyweights STALLED — 15m ROC {hw_stall['broad_roc']:+.2f}% "
+                f"but last 2m only {hw_stall['short_roc']:+.2f}% "
+                f"(ratio {hw_stall['ratio']:.0%})"
+            )
+            deductions += HW_STALL_DEDUCT
+
+        result["hw_summary"] = (
+            f"{hw_dir} {hw_str} {hw_roc:+.2f}% "
+            f"({ac}/10, {aw:.0f}%w)"
+        )
+    # ────────────────────────────────────────────────────────────────
 
     # TRAIL conditions
     if HTL_IV_EXIT_MIN <= iv_mom < HTL_IV_HOLD_MIN:

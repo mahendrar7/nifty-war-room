@@ -190,7 +190,7 @@ signal.signal(signal.SIGTERM, _signal_handler)
 signal.signal(signal.SIGINT, _signal_handler)
 
 from config import (
-    MARKET_OPEN, MARKET_CLOSE, INSTRUMENT_PROFILES,
+    MARKET_OPEN, MARKET_CLOSE, INSTRUMENT_PROFILES, HW_ROC_WINDOW_FAST,
 )
 
 # ── Instrument selection via CLI arg ─────────────────────────────────────────
@@ -233,6 +233,10 @@ from position_sizing import (
     compute_trade_mode, interpret_market,
     _get_regime_risk, _get_expiry_params,
     suggest_trade,
+)
+from heavyweight_momentum import (
+    fetch_heavyweight_prices, update_heavyweight_history,
+    compute_heavyweight_roc, compute_roc_trend, detect_hw_stall,
 )
 
 init(autoreset=True)
@@ -766,6 +770,8 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
             next_wall_distance=wall_distance,
             trade_direction=at["option_type"],
             oi_signal=oi_signal, prev_gamma=state.previous_gamma,
+            hw_momentum=hw_momentum, hw_roc_trend=hw_roc_trend,
+            hw_stall=hw_stall,
         )
         verdict = htl["verdict"]
         htl_color = (Fore.GREEN if verdict == "HOLD"
@@ -774,9 +780,12 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         htl_emoji = {"HOLD": "📈", "TRAIL": "⚠", "EXIT": "🚨"}[verdict]
         top_reason = (htl["exit_reasons"] or htl["trail_reasons"] or htl["hold_reasons"])
         reason_str = f"  {top_reason[0][:60]}" if top_reason else ""
+        hw_tag = f"  HW:{htl['hw_summary']}" if htl.get("hw_summary") else ""
         print(htl_color +
               f"{htl_emoji} HTL: {verdict}  Score:{htl['hold_score']}  "
               f"Stop:{htl['stop_suggestion']}{reason_str}" + Style.RESET_ALL)
+        if hw_tag:
+            print(Fore.CYAN + f"   {hw_tag}" + Style.RESET_ALL)
         print(f"   Active: {at['strike']} {at['option_type']} "
               f"@ ₹{at['entry_price']:.0f}  entered {at.get('entry_time', '?')}")
 
@@ -801,6 +810,8 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
             next_wall_distance=wall_distance,
             trade_direction=shadow_dir,
             oi_signal=oi_signal, prev_gamma=state.previous_gamma,
+            hw_momentum=hw_momentum, hw_roc_trend=hw_roc_trend,
+            hw_stall=hw_stall,
         )
         verdict = htl["verdict"]
         htl_color = (Fore.GREEN if verdict == "HOLD"
@@ -809,9 +820,12 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
         htl_emoji = {"HOLD": "📈", "TRAIL": "⚠", "EXIT": "🚨"}[verdict]
         top_reason = (htl["exit_reasons"] or htl["trail_reasons"] or htl["hold_reasons"])
         reason_str = f"  {top_reason[0][:60]}" if top_reason else ""
+        hw_tag = f"  HW:{htl['hw_summary']}" if htl.get("hw_summary") else ""
         print(htl_color +
               f"{htl_emoji} SHADOW HTL: {verdict}  Score:{htl['hold_score']}  "
               f"{reason_str}" + Style.RESET_ALL)
+        if hw_tag:
+            print(Fore.CYAN + f"   {hw_tag}" + Style.RESET_ALL)
         print(Fore.WHITE +
               f"   (tracking {ls['strike']} {ls['option_type']} "
               f"₹{ls['price']:.0f} — not logged, press Meta+I to enter)"
@@ -1263,6 +1277,18 @@ def run_logger():
             rows = fetch_quotes(symbols)
             df = build_option_dataframe(rows, spot)
             momentum_strikes = detect_momentum(df, state.previous_snapshot)
+
+            # ── Heavyweight momentum (for HTL) ──────────────────────
+            hw_prices = fetch_heavyweight_prices()
+            if hw_prices is not None:
+                update_heavyweight_history(state.hw_history, hw_prices)
+            in_trade = state.active_trade is not None
+            hw_momentum = compute_heavyweight_roc(state.hw_history)
+            hw_roc_trend = compute_roc_trend(
+                state.hw_history,
+                window=HW_ROC_WINDOW_FAST if in_trade else None,
+            )
+            hw_stall = detect_hw_stall(state.hw_history) if in_trade else None
 
             gamma, straddle, bias, trap_prob, counter = print_dashboard(
                 df, spot, atm, momentum_strikes, expiry
