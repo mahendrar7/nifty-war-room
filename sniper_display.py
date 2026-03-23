@@ -257,6 +257,7 @@ def _score_straddle(momentum_data):
 def _score_spot_vs_walls(spot, call_wall, put_wall, gamma):
     """
     Near a wall with negative gamma = breakout potential.
+    Near a wall with positive gamma = wall defense / bounce potential.
     Mid-range with positive gamma = pinned = low score.
     Past a wall = breakout underway = high score.
     """
@@ -285,10 +286,14 @@ def _score_spot_vs_walls(spot, call_wall, put_wall, gamma):
 
     # Near wall (within 15% of range from either side)
     if wall_frac <= 0.15:
-        score += 0.6
-        # Extra if gamma negative (walls more likely to break)
         if gamma < 0:
-            score += 0.2
+            # Breakout scenario — wall likely to break
+            score += 0.6
+            score += 0.2  # gamma amplifies
+        else:
+            # Defense scenario — wall likely to hold, bounce opportunity
+            score += 0.5
+            score += 0.15  # positive gamma = dealers defend the level
     elif wall_frac <= 0.25:
         score += 0.3
     else:
@@ -442,16 +447,30 @@ def _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze)
     return min(1.0, score)
 
 
-def _score_trend(trend):
+def _score_trend(trend, spot_history=None):
     """
     Pure price-action trend score — fallback when OI-derived signals lag.
-    Uses detect_persistent_trend() output.
+    Uses detect_persistent_trend() output + live ROC from spot_history.
+
+    Key insight: roc1 > 10pts (last candle moved 10+ pts in trade direction)
+    separates winners (75%) from losers with zero missed winners in backtest.
     """
     if not trend or not trend.get("trending"):
         return 0.0
 
     pts = trend.get("move_pts", 0)
     duration = trend.get("duration_minutes", 0)
+    trend_dir = trend.get("direction")  # "UP" or "DOWN"
+
+    # ── Live momentum check (roc1) ──────────────────────────
+    # If spot moved < 10pts in trend direction in the last candle,
+    # the move is stalling — suppress the score.
+    if spot_history and len(spot_history) >= 2 and trend_dir:
+        roc1 = spot_history[-1] - spot_history[-2]
+        if trend_dir == "DOWN":
+            roc1 = -roc1  # make positive when moving in trend direction
+        if roc1 < 10:
+            return 0.0  # stale trend — don't score
 
     score = 0.0
 
@@ -658,15 +677,15 @@ def _resolve_direction(bias, move_prob, flip_breakout, vacuum,
     direction = None
 
     # Structural events carry their own direction
-    if flip_breakout and flip_breakout.get("detected"):
+    if not direction and flip_breakout and flip_breakout.get("detected"):
         direction = flip_breakout["direction"]
-    elif liq_accel and liq_accel.get("detected") and liq_accel.get("conviction") == "HIGH":
+    elif not direction and liq_accel and liq_accel.get("detected") and liq_accel.get("conviction") == "HIGH":
         direction = liq_accel["direction"]
-    elif vacuum and vacuum.get("status") == "CONFIRMED":
+    elif not direction and vacuum and vacuum.get("status") == "CONFIRMED":
         direction = vacuum.get("direction")
-    elif wall_break_vac and wall_break_vac.get("detected"):
+    elif not direction and wall_break_vac and wall_break_vac.get("detected"):
         direction = wall_break_vac.get("direction")
-    elif trend and trend.get("trending"):
+    elif not direction and trend and trend.get("trending"):
         direction = trend["direction"]
 
     # Fall back to move_prob direction
@@ -685,9 +704,9 @@ def _resolve_direction(bias, move_prob, flip_breakout, vacuum,
             direction = "DOWN"
 
     # Map to display
-    if direction in ("UP", "BULLISH"):
+    if direction in ("UP", "UPSIDE", "BULLISH"):
         return "LONG", Fore.GREEN
-    elif direction in ("DOWN", "BEARISH"):
+    elif direction in ("DOWN", "DOWNSIDE", "BEARISH"):
         return "SHORT", Fore.RED
     else:
         return "NEUTRAL", Fore.YELLOW
@@ -778,6 +797,7 @@ def sniper_display(
     notify_fn=None,
     debug=False,
     gamma_history=None,
+    spot_history=None,
 ):
     """
     Call this at the end of print_dashboard().
@@ -804,7 +824,7 @@ def sniper_display(
         "iv_premium":        _score_iv(momentum_data, straddle, days_to_expiry),
         "move_prob":         _score_move_prob(move_prob),
         "structural_event":  _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze),
-        "trend":             _score_trend(trend),
+        "trend":             _score_trend(trend, spot_history=spot_history),
     }
 
     # Weighted total (0-10)

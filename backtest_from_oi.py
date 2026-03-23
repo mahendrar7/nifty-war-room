@@ -318,7 +318,7 @@ def run_one_day(options_path, min_pts=25):
             "iv_premium":        _score_iv(momentum_data, straddle, days_to_expiry),
             "move_prob":         _score_move_prob(move_prob),
             "structural_event":  _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze),
-            "trend":             _score_trend(trend),
+            "trend":             _score_trend(trend, spot_history=list(spot_history)),
         }
 
         total = sum(scores[k] * W[k] for k in scores)
@@ -450,12 +450,39 @@ def print_day_detail(summary):
               f"({sw['start_spot']:.0f}→{sw['end_spot']:.0f})  "
               f"{status}  best=[{best['score'] if best else 0}/10]")
 
+    # P&L simulation
+    trades = simulate_pnl(summary)
+    if trades:
+        pnl_total = sum(t["pnl"] for t in trades)
+        wins = sum(1 for t in trades if t["pnl"] > 0)
+        print(f"\n  P&L SIMULATION ({len(trades)} trades, {wins} wins)")
+        for j, t in enumerate(trades):
+            print(f"    #{j+1}  peak:{t['pts']:+.0f}  held:{t['candles']}m  "
+                  f"L1:{t['lot1_exit']} Rs{t['lot1_pnl']:+,}  "
+                  f"L2:{t['lot2_exit']} Rs{t['lot2_pnl']:+,}  "
+                  f"= Rs {t['pnl']:+,}")
+        print(f"  Net P&L: Rs {pnl_total:+,}")
+    print()
 
-def simulate_pnl(summary, num_lots=2, lot_size=65, delta=0.3, stop_pts=25):
-    """Simulate P&L for a single day's backtest results."""
+
+def simulate_pnl(summary, num_lots=2, lot_size=65, delta=0.3, stop_pts=20,
+                 target_pts=25, slippage_pts=2,
+                 trail_accel=0.20, trail_decel=0.50):
+    """
+    Simulate P&L with scale-out strategy.
+
+    2-lot approach:
+    - Stop: 20pts option. If hit, exit both lots.
+    - Lot 1 (scalp): Exit at 1:1.25 R:R (25pts option profit on 20pt stop).
+    - Lot 2 (runner): Once lot 1 is sold, stop moves to breakeven.
+                      Dynamic trail: 20% of peak when accelerating,
+                      50% of peak when decelerating.
+                      Exit on reverse signal or time limit (45 candles).
+    """
     results = summary["results"]
-    swings = summary["swings_list"]
-    qty = lot_size * num_lots
+    qty_per_lot = lot_size
+    nifty_stop = stop_pts / delta
+    nifty_target = target_pts / delta
 
     trades = []
     cooldown = 0
@@ -465,47 +492,121 @@ def simulate_pnl(summary, num_lots=2, lot_size=65, delta=0.3, stop_pts=25):
             continue
         if r["action"] not in ("TAKE TRADE", "SEND IT"):
             continue
+        if r["direction"] == "NEUTRAL":
+            continue
 
         direction = r["direction"]
         entry_spot = r["spot"]
-        cooldown = 9
 
-        # Match to a swing
-        matched_swing = None
-        for sw in swings:
-            sw_dir = "LONG" if sw["direction"] == "UP" else "SHORT"
-            if sw["start_idx"] - 3 <= i <= sw["end_idx"]:
-                if sw_dir == direction or direction == "NEUTRAL":
-                    matched_swing = sw
-                    break
+        future = results[i + 1:]
+        peak_move = 0.0
+        lot1_exited = False
+        lot1_pnl = 0.0
+        lot2_pnl = 0.0
+        lot1_exit_reason = ""
+        lot2_exit_reason = ""
+        candles_held = 0
+        prev_roc = 0
 
-        # Forward price action (next 30 candles)
-        future = results[i:i + 30]
-        max_adverse = 0
-        for fr in future[1:16]:
+        for j, fr in enumerate(future):
+            candles_held = j + 1
             move = fr["spot"] - entry_spot
             if direction == "SHORT":
                 move = -move
-            elif direction == "NEUTRAL":
-                move = -abs(move)  # worst case for neutral
-            if move < 0:
-                max_adverse = max(max_adverse, abs(move))
 
-        nifty_stop = stop_pts / delta  # Nifty pts that would trigger option stop
+            # Compute roc1 for acceleration detection
+            if j > 0:
+                prev_move = future[j - 1]["spot"] - entry_spot
+                if direction == "SHORT":
+                    prev_move = -prev_move
+                roc1 = move - prev_move
+            else:
+                roc1 = move
 
-        if max_adverse >= nifty_stop:
-            # Stopped out
-            pnl = -stop_pts * qty
-            trades.append({"pnl": pnl, "result": "STOP", "pts": 0})
-        elif matched_swing:
-            swing_pts = abs(matched_swing["pts"])
-            avg_delta = min(0.45, delta + (swing_pts / 500) * 0.15)
-            option_move = swing_pts * avg_delta
-            pnl = option_move * qty
-            trades.append({"pnl": pnl, "result": "WIN", "pts": swing_pts})
+            accelerating = roc1 > prev_roc and roc1 > 0
+            prev_roc = roc1
+
+            if move > peak_move:
+                peak_move = move
+
+            # ── Both lots still open ──
+            if not lot1_exited:
+                # Full stop: both lots out
+                if move <= -nifty_stop:
+                    lot1_pnl = -stop_pts
+                    lot2_pnl = -stop_pts
+                    lot1_exit_reason = "STOP"
+                    lot2_exit_reason = "STOP"
+                    break
+
+                # Lot 1 hits 1:1.25 target
+                if move >= nifty_target:
+                    lot1_pnl = target_pts
+                    lot1_exit_reason = "1:1.25"
+                    lot1_exited = True
+                    continue
+
+            # ── Lot 2 running (lot 1 already sold) ──
+            else:
+                # Breakeven stop
+                if move <= 0:
+                    lot2_pnl = 0
+                    lot2_exit_reason = "BE"
+                    break
+
+                # Reverse signal — sniper fires opposite direction
+                fr_action = fr.get("action", "")
+                fr_dir = fr.get("direction", "")
+                if fr_action in ("TAKE TRADE", "SEND IT"):
+                    opposite = (direction == "LONG" and fr_dir == "SHORT") or \
+                               (direction == "SHORT" and fr_dir == "LONG")
+                    if opposite:
+                        lot2_pnl = move * delta
+                        lot2_exit_reason = "REVERSE"
+                        break
+
+                # Dynamic trail: tight when accelerating, loose when decelerating
+                trail_pct = trail_accel if accelerating else trail_decel
+                trail_level = peak_move * (1 - trail_pct)
+                if trail_level > 0 and move <= trail_level:
+                    lot2_pnl = move * delta
+                    lot2_exit_reason = "TRAIL"
+                    break
+
+            # Time limit
+            if candles_held >= 45:
+                if not lot1_exited:
+                    lot1_pnl = move * delta
+                    lot1_exit_reason = "TIME"
+                lot2_pnl = move * delta
+                lot2_exit_reason = "TIME"
+                break
+
         else:
-            pnl = -5 * qty  # scratch/spread
-            trades.append({"pnl": pnl, "result": "FLAT", "pts": 0})
+            # End of data
+            if not lot1_exited:
+                lot1_pnl = (move if future else 0) * delta
+                lot1_exit_reason = "EOD"
+            lot2_pnl = (move if future else 0) * delta
+            lot2_exit_reason = "EOD"
+
+        # Apply slippage
+        lot1_pnl_final = (lot1_pnl - slippage_pts * 2) * qty_per_lot
+        lot2_pnl_final = (lot2_pnl - slippage_pts * 2) * qty_per_lot
+        total_pnl = round(lot1_pnl_final + lot2_pnl_final)
+
+        cooldown = max(5, candles_held)
+
+        trades.append({
+            "pnl": total_pnl,
+            "lot1_pnl": round(lot1_pnl_final),
+            "lot1_exit": lot1_exit_reason,
+            "lot2_pnl": round(lot2_pnl_final),
+            "lot2_exit": lot2_exit_reason,
+            "result": lot2_exit_reason if lot1_exited else lot1_exit_reason,
+            "pts": round(peak_move, 1),
+            "candles": candles_held,
+        })
 
     return trades
 
@@ -531,16 +632,26 @@ def run_daily_report(instrument="nifty", min_pts=50, num_lots=2, lot_size=65):
         today = run_one_day(today_file, min_pts=min_pts)
         if today and today["swings"] > 0:
             trades_today = simulate_pnl(today, num_lots=num_lots, lot_size=lot_size)
-            wins = sum(1 for t in trades_today if t["result"] == "WIN")
+            profitable = sum(1 for t in trades_today if t["pnl"] > 0)
             stops = sum(1 for t in trades_today if t["result"] == "STOP")
+            trails = sum(1 for t in trades_today if t["result"] == "TRAIL")
             pnl_today = sum(t["pnl"] for t in trades_today)
             rate = (today["caught"] + today["stalked"]) / today["swings"] * 100
 
             print(f"\n  TODAY ({os.path.basename(today_file)})")
             print(f"  Swings: {today['swings']}  |  Caught: {today['caught']}  |  "
                   f"Stalked: {today['stalked']}  |  Missed: {today['missed']}  |  Rate: {rate:.0f}%")
-            print(f"  Trades: {len(trades_today)}  |  Wins: {wins}  |  Stops: {stops}")
+            print(f"  Trades: {len(trades_today)}  |  Profitable: {profitable}  |  Stops: {stops}")
             print(f"  P&L: Rs {pnl_today:+,.0f}")
+            for j, t in enumerate(trades_today):
+                peak = t.get("pts", 0)
+                held = t.get("candles", 0)
+                l1 = t.get("lot1_exit", "?")
+                l2 = t.get("lot2_exit", "?")
+                print(f"    #{j+1}  peak:{peak:+.0f}  held:{held}m  "
+                      f"L1:{l1} Rs{t.get('lot1_pnl',0):+,}  "
+                      f"L2:{l2} Rs{t.get('lot2_pnl',0):+,}  "
+                      f"= Rs {t['pnl']:+,}")
         else:
             print(f"\n  TODAY: No 50pt+ swings detected")
     else:
@@ -567,7 +678,7 @@ def run_daily_report(instrument="nifty", min_pts=50, num_lots=2, lot_size=65):
 
             trades = simulate_pnl(s, num_lots=num_lots, lot_size=lot_size)
             cum_trades += len(trades)
-            cum_wins += sum(1 for t in trades if t["result"] == "WIN")
+            cum_wins += sum(1 for t in trades if t["pnl"] > 0)
             cum_stops += sum(1 for t in trades if t["result"] == "STOP")
             cum_pnl += sum(t["pnl"] for t in trades)
 

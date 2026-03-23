@@ -327,7 +327,7 @@ def run_backtest(signals_path):
             "iv_premium":        _score_iv(momentum_data, straddle, days_to_expiry),
             "move_prob":         _score_move_prob(move_prob),
             "structural_event":  _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze),
-            "trend":             _score_trend(trend),
+            "trend":             _score_trend(trend, spot_history=list(spot_history)),
         }
 
         total = sum(scores[k] * W[k] for k in scores)
