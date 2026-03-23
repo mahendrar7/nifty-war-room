@@ -190,7 +190,8 @@ signal.signal(signal.SIGTERM, _signal_handler)
 signal.signal(signal.SIGINT, _signal_handler)
 
 from config import (
-    MARKET_OPEN, MARKET_CLOSE, INSTRUMENT_PROFILES, HW_ROC_WINDOW_FAST,
+    MARKET_OPEN, MARKET_CLOSE, INSTRUMENT_PROFILES,
+    HW_ROC_WINDOW, HW_ROC_WINDOW_FAST,
 )
 
 # ── Instrument selection via CLI arg ─────────────────────────────────────────
@@ -290,7 +291,8 @@ def notify(message):
 # =============================================================================
 # DASHBOARD
 # =============================================================================
-def print_dashboard(df, spot, atm, momentum_strikes, expiry):
+def print_dashboard(df, spot, atm, momentum_strikes, expiry,
+                    hw_momentum=None, hw_roc_trend=None, hw_stall=None):
     prev = state.previous_snapshot
 
     # ── Increment tick counter for throttle system ─────────────────────────
@@ -786,6 +788,13 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
               f"Stop:{htl['stop_suggestion']}{reason_str}" + Style.RESET_ALL)
         if hw_tag:
             print(Fore.CYAN + f"   {hw_tag}" + Style.RESET_ALL)
+        else:
+            hw_have = len(state.hw_history)
+            hw_need = HW_ROC_WINDOW + 1
+            if hw_have < hw_need:
+                print(Fore.YELLOW +
+                      f"   HW: warming up ({hw_have}/{hw_need} candles)"
+                      + Style.RESET_ALL)
         print(f"   Active: {at['strike']} {at['option_type']} "
               f"@ ₹{at['entry_price']:.0f}  entered {at.get('entry_time', '?')}")
 
@@ -826,6 +835,13 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry):
               f"{reason_str}" + Style.RESET_ALL)
         if hw_tag:
             print(Fore.CYAN + f"   {hw_tag}" + Style.RESET_ALL)
+        else:
+            hw_have = len(state.hw_history)
+            hw_need = HW_ROC_WINDOW + 1
+            if hw_have < hw_need:
+                print(Fore.YELLOW +
+                      f"   HW: warming up ({hw_have}/{hw_need} candles)"
+                      + Style.RESET_ALL)
         print(Fore.WHITE +
               f"   (tracking {ls['strike']} {ls['option_type']} "
               f"₹{ls['price']:.0f} — not logged, press Meta+I to enter)"
@@ -1291,7 +1307,9 @@ def run_logger():
             hw_stall = detect_hw_stall(state.hw_history) if in_trade else None
 
             gamma, straddle, bias, trap_prob, counter = print_dashboard(
-                df, spot, atm, momentum_strikes, expiry
+                df, spot, atm, momentum_strikes, expiry,
+                hw_momentum=hw_momentum, hw_roc_trend=hw_roc_trend,
+                hw_stall=hw_stall,
             )
 
             state.previous_snapshot = df.copy()
