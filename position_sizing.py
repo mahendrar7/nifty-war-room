@@ -128,10 +128,8 @@ def choose_otm_strike(spot, expected_move, direction, gamma, flip_level, regime)
 # =============================================================================
 
 def compute_position_size(option_price, regime, confidence,
-                          trap_confidence, ml_signal, days_to_expiry=5):
-    risk_pct = _get_regime_risk(regime)
-    if risk_pct == 0:
-        return 0
+                          ml_signal, days_to_expiry=5):
+    risk_pct = max(_get_regime_risk(regime), BASE_RISK_PCT)
 
     stop_pct, lot_cap, risk_scalar = _get_expiry_params(days_to_expiry)
     account_risk  = ACCOUNT_SIZE * risk_pct * risk_scalar
@@ -139,17 +137,10 @@ def compute_position_size(option_price, regime, confidence,
     risk_per_lot  = stop_distance * LOT_SIZE
 
     if risk_per_lot == 0:
-        return 0
+        return 1
 
     base_lots = account_risk / risk_per_lot
     base_lots *= max(confidence / 100, 0.25)
-
-    if trap_confidence >= 80:
-        return 0
-    elif trap_confidence >= 60:
-        base_lots *= 0.4
-    elif trap_confidence >= 40:
-        base_lots *= 0.7
 
     if ml_signal == "agree":
         base_lots *= 1.30
@@ -159,9 +150,6 @@ def compute_position_size(option_price, regime, confidence,
     base_lots = min(base_lots, lot_cap)
     max_from_capital = (ACCOUNT_SIZE * MAX_CAPITAL_PCT) / (option_price * LOT_SIZE)
     base_lots        = min(base_lots, max_from_capital)
-
-    if base_lots < 0.5:
-        return 0
 
     return max(1, int(base_lots))
 
@@ -202,12 +190,9 @@ def suggest_trade(spot, straddle, direction, df, gamma, flip_level,
         option_price    = price,
         regime          = regime,
         confidence      = confidence,
-        trap_confidence = 0,   # sniper already factored trap into its score
         ml_signal       = ml_signal,
         days_to_expiry  = days_to_expiry,
     )
-    if lots == 0:
-        return None
 
     stop_pct, lot_cap, risk_scalar = _get_expiry_params(days_to_expiry)
     stop       = round(price * (1 - stop_pct), 2)

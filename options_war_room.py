@@ -238,6 +238,7 @@ from position_sizing import (
 from heavyweight_momentum import (
     fetch_heavyweight_prices, update_heavyweight_history,
     compute_heavyweight_roc, compute_roc_trend, detect_hw_stall,
+    save_hw_history, restore_hw_history, clear_hw_history,
 )
 
 init(autoreset=True)
@@ -880,12 +881,23 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
 
     if trade:
         t = trade
+        now_str = datetime.now().strftime("%H:%M")
         print(f"💡 {t['strike']} {t['option_type']}  "
               f"₹{t['price']:.0f}  ×{t['lots']}lot  "
               f"Stop:₹{t['stop']:.0f}  Target:₹{t['target']:.0f}  "
               f"Risk:₹{t['risk']:,.0f}")
-        print(f"  {Fore.WHITE}Meta+I / Ctrl+T → log entry  │  Meta+X / Ctrl+X → exit{Style.RESET_ALL}")
         state.last_suggestion = trade
+        state.active_trade = {
+            "strike": t["strike"],
+            "option_type": t["option_type"],
+            "entry_price": t["price"],
+            "entry_time": now_str,
+            "lots": t["lots"],
+            "trade_type": t.get("trade_type", "directional"),
+        }
+        print(Fore.GREEN +
+              f"  ✅ AUTO-ENTERED → HTL active  │  Meta+X / Ctrl+X → exit"
+              + Style.RESET_ALL)
 
         # Telegram with full trade details
         icon = "🎯🎯🎯" if sniper_action == "SEND IT" else "🎯"
@@ -1000,6 +1012,27 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
             if c_iv_d is not None and p_iv_d is not None:
                 print(f"ATM IV  C:{c_iv_d * 100:.1f}%  P:{p_iv_d * 100:.1f}%")
         print(f"Best call: {best_call} CE  │  Best put: {best_put} PE")
+        # Heavyweight momentum debug
+        if hw_momentum is not None:
+            hw = hw_momentum
+            print(Fore.CYAN + f"HW: {hw['direction']} {hw['strength']} "
+                  f"wROC:{hw['weighted_roc']:+.3f}%  "
+                  f"aligned:{hw['aligned_count']}/10 ({hw['aligned_weight']:.0f}%w)"
+                  + Style.RESET_ALL)
+            for m in hw["movers"][:5]:
+                print(f"   {m['name']:12s} {m['roc']:+.3f}%  w:{m['weight']:.1f}%")
+        else:
+            hw_have = len(state.hw_history)
+            hw_need = HW_ROC_WINDOW + 1
+            print(Fore.YELLOW + f"HW: no data ({hw_have}/{hw_need} candles)"
+                  + Style.RESET_ALL)
+        if hw_roc_trend is not None:
+            print(f"HW ROC trend: {hw_roc_trend}")
+        if hw_stall is not None:
+            st = hw_stall
+            tag = "STALLED" if st["stalled"] else "ok"
+            print(f"HW stall: {tag}  broad:{st['broad_roc']:+.3f}%  "
+                  f"short:{st['short_roc']:+.3f}%  ratio:{st['ratio']:.0%}")
         print_divider(char="-")
 
     # ── Persist all derived signals for post-session debrief ──────────────
@@ -1247,6 +1280,7 @@ def run_logger():
             global _SIGNALS_CSV
             _SIGNALS_CSV = None   # reset so next day gets a fresh file
             state.reset_session()
+            clear_hw_history()
             if ml is not None:
                 try:
                     print("🔄 Retraining ML model...")
@@ -1298,6 +1332,7 @@ def run_logger():
             hw_prices = fetch_heavyweight_prices()
             if hw_prices is not None:
                 update_heavyweight_history(state.hw_history, hw_prices)
+                save_hw_history(state.hw_history)
             in_trade = state.active_trade is not None
             hw_momentum = compute_heavyweight_roc(state.hw_history)
             hw_roc_trend = compute_roc_trend(
@@ -1432,7 +1467,15 @@ def start_hotkey_listener():
 
 
 def _register_trade_entry():
+    if state.active_trade is not None:
+        at = state.active_trade
+        print(f"\n  {Fore.YELLOW}Trade already active: "
+              f"{at['strike']} {at['option_type']} @ ₹{at['entry_price']:.0f}"
+              f"{Style.RESET_ALL}")
+        return
+
     now = datetime.now().strftime("%H:%M")
+
     if state.last_suggestion is not None:
         s = state.last_suggestion
         state.active_trade = {
@@ -1450,53 +1493,38 @@ def _register_trade_entry():
             f"🟢 ENTRY: {s['strike']} {s['option_type']} @ ₹{s['price']:.0f} "
             f"| ×{s['lots']} | Stop ₹{s['stop']:.0f} | Target ₹{s['target']:.0f} | {now}"
         )
-    else:
-        # No suggestion cached — offer manual entry via /dev/tty
-        # (avoids EOF from Meta+key poisoning stdin)
-        import threading
-        import sys
+        return
 
-        def _manual():
-            tty = None
-            try:
-                try:
-                    tty = open("/dev/tty", "r")
-                    read_line = tty.readline
-                except OSError:
-                    tty = None
-                    read_line = sys.stdin.readline
+    # No suggestion cached — manual entry via /dev/tty
+    import threading
 
-                def prompt(msg):
-                    sys.stdout.write(msg)
-                    sys.stdout.flush()
-                    line = read_line()
-                    if not line:
-                        raise EOFError("stdin closed")
-                    return line.strip()
+    def _manual():
+        tty = None
+        try:
+            tty = open("/dev/tty", "r")
+            print(f"\n{'─' * 50}")
+            print(f"  {Fore.YELLOW}No suggestion cached.{Style.RESET_ALL} Manual entry:")
+            strike      = int(_prompt_tty(tty, "  Strike: "))
+            opt_type    = _prompt_tty(tty, "  CE/PE: ").upper()
+            entry_price = float(_prompt_tty(tty, "  Entry price: "))
+            lots        = int(_prompt_tty(tty, "  Lots: "))
+            state.active_trade = {
+                "strike": strike, "option_type": opt_type,
+                "entry_price": entry_price, "entry_time": now,
+                "lots": lots, "trade_type": "manual",
+            }
+            msg = f"✅ MANUAL: {strike} {opt_type} ₹{entry_price:.0f} ×{lots} | {now}"
+            print(f"  {Fore.GREEN}{msg}{Style.RESET_ALL}\n{'─' * 50}")
+            notify(
+                f"🟢 MANUAL ENTRY: {strike} {opt_type} @ ₹{entry_price:.0f} | ×{lots} | {now}"
+            )
+        except (EOFError, ValueError, OSError) as e:
+            print(f"  ⚠ Entry cancelled: {e}")
+        finally:
+            if tty:
+                tty.close()
 
-                print(f"\n{'─' * 50}")
-                print(f"  {Fore.YELLOW}No suggestion cached.{Style.RESET_ALL} Enter details:")
-                strike      = int(prompt("  Strike: "))
-                opt_type    = prompt("  CE/PE: ").upper()
-                entry_price = float(prompt("  Entry price: "))
-                lots        = int(prompt("  Lots: "))
-                state.active_trade = {
-                    "strike": strike, "option_type": opt_type,
-                    "entry_price": entry_price, "entry_time": now,
-                    "lots": lots, "trade_type": "manual",
-                }
-                msg = f"✅ MANUAL: {strike} {opt_type} ₹{entry_price:.0f} ×{lots} | {now}"
-                print(f"  {Fore.GREEN}{msg}{Style.RESET_ALL}\n{'─' * 50}")
-                notify(
-                    f"🟢 MANUAL ENTRY: {strike} {opt_type} @ ₹{entry_price:.0f} | ×{lots} | {now}"
-                )
-            except (EOFError, ValueError) as e:
-                print(f"  ⚠ Entry cancelled: {e}")
-            finally:
-                if tty:
-                    tty.close()
-
-        threading.Thread(target=_manual, daemon=True).start()
+    threading.Thread(target=_manual, daemon=True).start()
 
 
 def _prompt_tty(tty, prompt):
@@ -1535,4 +1563,5 @@ if __name__ == "__main__":
     _start_caffeinate()
     start_hotkey_listener()
     restore_state_from_csv(csv_file=CSV_FILE)
+    restore_hw_history(state.hw_history)
     run_logger()

@@ -54,6 +54,51 @@ def update_heavyweight_history(hw_history, prices):
     hw_history.append({"time": datetime.now(), "prices": prices})
 
 
+HW_CACHE_FILE = "data/hw_history.json"
+
+
+def clear_hw_history():
+    """Delete cached heavyweight history (end-of-day cleanup)."""
+    import os
+    try:
+        os.remove(HW_CACHE_FILE)
+    except FileNotFoundError:
+        pass
+
+
+def save_hw_history(hw_history):
+    """Persist heavyweight history to disk."""
+    import json
+    records = [
+        {"time": entry["time"].isoformat(), "prices": entry["prices"]}
+        for entry in hw_history
+    ]
+    try:
+        with open(HW_CACHE_FILE, "w") as f:
+            json.dump(records, f)
+    except Exception:
+        pass
+
+
+def restore_hw_history(hw_history):
+    """Reload heavyweight history from disk on startup."""
+    import json, os
+    if not os.path.exists(HW_CACHE_FILE):
+        return
+    try:
+        with open(HW_CACHE_FILE, "r") as f:
+            records = json.load(f)
+        cutoff = datetime.now() - __import__("datetime").timedelta(minutes=60)
+        for rec in records:
+            t = datetime.fromisoformat(rec["time"])
+            if t >= cutoff:
+                hw_history.append({"time": t, "prices": rec["prices"]})
+        if hw_history:
+            print(f"✅ HW history restored ({len(hw_history)} candles)")
+    except Exception as e:
+        print(f"⚠ HW history restore failed: {e}")
+
+
 def compute_heavyweight_roc(hw_history, window=None):
     """
     Compute weighted ROC for heavyweights over `window` candles.
