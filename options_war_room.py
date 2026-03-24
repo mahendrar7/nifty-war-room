@@ -1084,7 +1084,142 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         days_to_expiry=days_to_expiry,
     )
 
+    # ── Write snapshot JSON for Telegram bot ──────────────────────────────
+    _write_snapshot(
+        spot=spot, atm=atm, straddle=straddle, gamma=gamma,
+        bias=bias, confidence=confidence, regime=regime, action=action,
+        call_wall=call_wall, put_wall=put_wall, flip_level=flip_level,
+        gravity=gravity, pcr_val=pcr_val, momentum_5m=momentum_5m,
+        velocity=velocity, trap=trap, move_prob=move_prob,
+        vacuum=vacuum, wall_break_vac=wall_break_vac,
+        flip_breakout=flip_breakout, liq_accel=liq_accel,
+        sniper_result=sniper_result, sniper_action=sniper_action,
+        trade=trade, htl=htl, htl_source=htl_source,
+        days_to_expiry=days_to_expiry, hw_momentum=hw_momentum,
+        hw_stall=hw_stall, hw_roc_trend=hw_roc_trend,
+    )
+
     return gamma, straddle, bias, trap_prob, count
+
+
+# =============================================================================
+# SNAPSHOT WRITER — for Telegram /status bot
+# =============================================================================
+def _write_snapshot(**kw):
+    """Dump key metrics to data/snapshot_{instrument}.json every tick."""
+    import json
+    snap = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "instrument": _instrument_arg,
+        "spot": round(kw["spot"], 2),
+        "atm": kw["atm"],
+        "straddle": round(kw["straddle"], 1),
+        "expected_move": round(kw["straddle"] / 2, 1),
+        "gamma": int(kw["gamma"]),
+        "bias": kw["bias"],
+        "confidence": kw["confidence"],
+        "regime": kw["regime"],
+        "action": kw["action"],
+        "call_wall": kw["call_wall"],
+        "put_wall": kw["put_wall"],
+        "flip_level": kw["flip_level"],
+        "gravity": kw["gravity"],
+        "pcr": kw["pcr_val"],
+        "days_to_expiry": kw["days_to_expiry"],
+        "momentum_5m": round(kw["momentum_5m"], 1) if kw["momentum_5m"] is not None else None,
+        "velocity": kw["velocity"],
+    }
+
+    # Triggers
+    trap = kw["trap"]
+    if trap and trap["confidence"] >= 60:
+        snap["trap"] = {"type": trap["type"], "confidence": trap["confidence"],
+                        "fade_strike": trap["fade_strike"], "fade_type": trap["fade_type"]}
+
+    mp = kw["move_prob"]
+    if mp and mp["probability"] >= 40:
+        snap["move_prob"] = {"probability": mp["probability"], "direction": mp["direction"],
+                             "conviction": mp["conviction"]}
+
+    vac = kw["vacuum"]
+    if vac and vac["detected"]:
+        snap["vacuum"] = {"status": vac["status"], "direction": vac["direction"],
+                          "score": vac["score"]}
+
+    wb = kw["wall_break_vac"]
+    if wb and wb["detected"]:
+        snap["wall_break"] = {"direction": wb["direction"]}
+
+    fb = kw["flip_breakout"]
+    if fb and fb["detected"]:
+        snap["flip_breakout"] = {"direction": fb["direction"]}
+
+    la = kw["liq_accel"]
+    if la and la["detected"]:
+        snap["liq_accel"] = {"direction": la["direction"], "conviction": la["conviction"],
+                             "score": la["score"]}
+
+    # Sniper
+    sr = kw["sniper_result"]
+    if sr:
+        snap["sniper"] = {
+            "action": kw["sniper_action"],
+            "score": round(sr["score"], 1) if sr.get("score") is not None else None,
+            "direction": sr.get("direction"),
+            "setup": sr.get("setup"),
+            "confidence": sr.get("confidence"),
+        }
+
+    # Trade
+    if state.active_trade:
+        at = state.active_trade
+        snap["active_trade"] = {
+            "strike": at["strike"], "option_type": at["option_type"],
+            "entry_price": at["entry_price"], "entry_time": at.get("entry_time"),
+            "lots": at["lots"],
+        }
+
+    htl = kw["htl"]
+    if htl:
+        snap["htl"] = {"verdict": htl["verdict"], "score": htl["hold_score"],
+                        "source": kw["htl_source"]}
+
+    # ML
+    if state.last_ml_result and state.last_ml_result["signal"] != 0:
+        lr = state.last_ml_result
+        snap["ml"] = {"label": lr["label"], "confidence": round(lr["confidence"], 2),
+                       "x_points": round(lr["x_points"], 0)}
+
+    # Heavyweights
+    hw = kw["hw_momentum"]
+    if hw:
+        snap["heavyweights"] = {
+            "direction": hw["direction"], "strength": hw["strength"],
+            "weighted_roc": round(hw["weighted_roc"], 3),
+            "aligned": hw["aligned_count"],
+        }
+        if kw["hw_stall"] and kw["hw_stall"]["stalled"]:
+            snap["heavyweights"]["stalled"] = True
+        if kw["hw_roc_trend"]:
+            snap["heavyweights"]["roc_trend"] = kw["hw_roc_trend"]
+
+    path = f"data/snapshot_{_instrument_arg.lower()}.json"
+    tmp  = path + ".tmp"
+    try:
+        import numpy as np
+        def _default(obj):
+            if isinstance(obj, (np.integer,)):
+                return int(obj)
+            if isinstance(obj, (np.floating,)):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return str(obj)
+        with open(tmp, "w") as f:
+            json.dump(snap, f, indent=2, default=_default)
+        os.replace(tmp, path)   # atomic rename
+    except Exception:
+        pass   # never crash the main loop for a status file
 
 
 # =============================================================================
@@ -1265,6 +1400,89 @@ def archive_daily_log():
 
 
 # =============================================================================
+# TELEGRAM COMMAND PROCESSOR
+# =============================================================================
+def _process_telegram_command():
+    """Check for and execute commands written by telegram_bot.py."""
+    import json as _json
+    cmd_path = f"data/cmd_{_instrument_arg.lower()}.json"
+    if not os.path.exists(cmd_path):
+        return
+    try:
+        with open(cmd_path) as f:
+            cmd = _json.load(f)
+        os.remove(cmd_path)
+    except (IOError, _json.JSONDecodeError):
+        return
+
+    action = cmd.get("action")
+
+    if action == "enter":
+        if state.active_trade is not None:
+            at = state.active_trade
+            print(f"  {Fore.YELLOW}⚠ Telegram /enter ignored — already in "
+                  f"{at['strike']} {at['option_type']}{Style.RESET_ALL}")
+            return
+
+        now_str = cmd.get("time", datetime.now().strftime("%H:%M"))
+
+        if cmd.get("manual"):
+            state.active_trade = {
+                "strike": cmd["strike"],
+                "option_type": cmd["option_type"],
+                "entry_price": cmd["price"],
+                "entry_time": now_str,
+                "lots": cmd["lots"],
+                "trade_type": "manual",
+            }
+            msg = (f"✅ TELEGRAM ENTRY: {cmd['strike']} {cmd['option_type']} "
+                   f"₹{cmd['price']:.0f} ×{cmd['lots']} | {now_str}")
+            print(f"\n{'─' * 50}\n  {Fore.GREEN}{msg}{Style.RESET_ALL}\n{'─' * 50}")
+            notify(
+                f"🟢 ENTRY (Telegram): {cmd['strike']} {cmd['option_type']} "
+                f"@ ₹{cmd['price']:.0f} | ×{cmd['lots']} | {now_str}"
+            )
+        elif state.last_suggestion is not None:
+            s = state.last_suggestion
+            state.active_trade = {
+                "strike": s["strike"],
+                "option_type": s["option_type"],
+                "entry_price": s["price"],
+                "entry_time": now_str,
+                "lots": s["lots"],
+                "trade_type": s.get("trade_type", "directional"),
+            }
+            msg = (f"✅ TELEGRAM ENTRY: {s['strike']} {s['option_type']} "
+                   f"₹{s['price']:.0f} ×{s['lots']} | {now_str}")
+            print(f"\n{'─' * 50}\n  {Fore.GREEN}{msg}{Style.RESET_ALL}\n{'─' * 50}")
+            notify(
+                f"🟢 ENTRY (Telegram): {s['strike']} {s['option_type']} "
+                f"@ ₹{s['price']:.0f} | ×{s['lots']} "
+                f"| Stop ₹{s['stop']:.0f} | Target ₹{s['target']:.0f} | {now_str}"
+            )
+        else:
+            print(f"  {Fore.YELLOW}⚠ Telegram /enter — no suggestion cached{Style.RESET_ALL}")
+            notify("⚠️ /enter failed — no suggestion cached. Use manual: /enter NIFTY 23500 CE 150 2")
+
+    elif action == "exit":
+        if state.active_trade is None:
+            print(f"  {Fore.YELLOW}⚠ Telegram /exit — no active trade{Style.RESET_ALL}")
+            return
+        at = state.active_trade
+        now_str = cmd.get("time", datetime.now().strftime("%H:%M"))
+        print(f"\n{'─' * 50}")
+        print(f"  {Fore.RED}🚨 TELEGRAM EXIT{Style.RESET_ALL}")
+        print(f"  {at['strike']} {at['option_type']} | "
+              f"Entry ₹{at['entry_price']:.0f} @ {at['entry_time']} | Exited {now_str}")
+        print(f"{'─' * 50}")
+        notify(
+            f"🔴 EXIT (Telegram): {at['strike']} {at['option_type']} | "
+            f"Entry ₹{at['entry_price']:.0f} @ {at['entry_time']} | Exited {now_str}"
+        )
+        state.active_trade = None
+
+
+# =============================================================================
 # MAIN LOOP
 # =============================================================================
 def run_logger():
@@ -1324,6 +1542,9 @@ def run_logger():
             continue
 
         try:
+            # ── Process Telegram commands ─────────────────────────────
+            _process_telegram_command()
+
             print(f"\nSnapshot: {now.strftime('%H:%M:%S')}")
 
             expiry = get_nearest_expiry(instruments, name=PROFILE["name"])

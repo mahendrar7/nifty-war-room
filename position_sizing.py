@@ -236,6 +236,6 @@ def suggest_trade(spot, straddle, direction, df, gamma, flip_level,
         "reward":      reward_amt,
         "otm_pct":     otm_pct,
         "capital":     capital,
-        "trade_type":  trade_type,
+        "trade_type":  sniper_setup or "directional",
         "reasoning":   reasoning,
     }
