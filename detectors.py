@@ -58,28 +58,78 @@ def detect_persistent_trend(spot, expected_move):
     over the last TREND_WINDOW_MINUTES, this is a trending regime where
     mean-reversion signals (traps) should be suppressed.
 
+    Pullback detection (two layers):
+      1. Deque-based: 30-min window direction disagrees with 60-min broad direction.
+      2. Session H/L fallback: if spot trending DOWN but session rally from low
+         is much larger than the pullback, it's a retrace within a larger move.
+         This catches cases where the deque was reset (restart) or the rally
+         origin fell outside the 60-entry window.
+
     Returns: {"trending": bool, "direction": "UP"/"DOWN"/None,
-              "move_pts": float, "duration_minutes": int}
+              "move_pts": float, "duration_minutes": int,
+              "pullback": bool, "broader_direction": "UP"/"DOWN"/None,
+              "broader_move_pts": float}
     """
     from config import TREND_WINDOW_MINUTES, TREND_MIN_MOVE_MULT
     history = list(state.spot_history)
-    if len(history) < 10:  # need at least 10 minutes
-        return {"trending": False, "direction": None, "move_pts": 0, "duration_minutes": 0}
 
-    # Use the window or full history, whichever is shorter
+    base = {"trending": False, "direction": None, "move_pts": 0,
+            "duration_minutes": 0, "pullback": False,
+            "broader_direction": None, "broader_move_pts": 0}
+
+    if len(history) < 10:
+        return base
+
+    # ── Short window (30 min) ────────────────────────────────────
     window = history[-TREND_WINDOW_MINUTES:]
     move = spot - window[0]
     threshold = expected_move * TREND_MIN_MOVE_MULT
 
+    # ── Broader window (full history, up to 60 min) ──────────────
+    broad_move = spot - history[0]
+    broad_direction = "UP" if broad_move > 0 else "DOWN" if broad_move < 0 else None
+    broad_abs = round(abs(broad_move), 1)
+
     if abs(move) >= threshold:
         direction = "UP" if move > 0 else "DOWN"
+
+        # Layer 1: deque-based pullback — short window disagrees with broad
+        pullback = (direction != broad_direction
+                    and abs(broad_move) >= threshold)
+
+        # Layer 2: session H/L fallback — catches pullbacks after restart
+        # or when the rally origin is outside the 60-entry deque.
+        # Uses position-in-range: trending DOWN is only a pullback if spot
+        # is in the UPPER half of session range (and vice versa).
+        if not pullback and state.session_high is not None and state.session_low is not None:
+            session_range = state.session_high - state.session_low
+            if session_range >= threshold * 2:  # meaningful session range
+                position = (spot - state.session_low) / session_range  # 0=low, 1=high
+                rally_from_low = spot - state.session_low
+                drop_from_high = state.session_high - spot
+                if (direction == "DOWN" and position > 0.5
+                        and rally_from_low > abs(move) * 2):
+                    pullback = True
+                    broad_direction = "UP"
+                    broad_abs = round(rally_from_low, 1)
+                elif (direction == "UP" and position < 0.5
+                        and drop_from_high > abs(move) * 2):
+                    pullback = True
+                    broad_direction = "DOWN"
+                    broad_abs = round(drop_from_high, 1)
+
         return {
             "trending": True,
             "direction": direction,
             "move_pts": round(abs(move), 1),
             "duration_minutes": len(window),
+            "pullback": pullback,
+            "broader_direction": broad_direction,
+            "broader_move_pts": broad_abs,
         }
-    return {"trending": False, "direction": None, "move_pts": 0, "duration_minutes": 0}
+
+    return {**base, "broader_direction": broad_direction,
+            "broader_move_pts": broad_abs}
 
 
 # =============================================================================

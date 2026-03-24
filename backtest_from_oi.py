@@ -114,12 +114,28 @@ def load_day(options_path):
 
 
 def compute_walls(df, spot):
-    """Compute call/put walls from OI data."""
-    above = df[df["strike"] >= spot]
-    below = df[df["strike"] <= spot]
+    """
+    Compute call/put walls using gamma-weighted 3-strike cluster smoothing.
+    Approximates gamma with a distance-based decay since BS gamma columns
+    aren't in backtest data.  Matches live system's compute_oi_walls().
+    """
+    import numpy as np
+    df = df.sort_values("strike").copy()
 
-    call_wall = above.loc[above["call_oi"].idxmax(), "strike"] if not above.empty and above["call_oi"].max() > 0 else spot + 100
-    put_wall = below.loc[below["put_oi"].idxmax(), "strike"] if not below.empty and below["put_oi"].max() > 0 else spot - 100
+    # Approximate gamma: peaks at ATM, decays with distance
+    # Using a Gaussian-like decay: gamma ~ exp(-0.5 * (distance/sigma)^2)
+    sigma = 150  # reasonable for NIFTY strike spacing
+    dist = (df["strike"] - spot).abs()
+    gamma_approx = np.exp(-0.5 * (dist / sigma) ** 2)
+
+    df["call_wall_strength"] = gamma_approx * df["call_oi"].astype(float)
+    df["put_wall_strength"]  = gamma_approx * df["put_oi"].astype(float)
+
+    df["call_cluster"] = df["call_wall_strength"].rolling(3, center=True, min_periods=1).sum()
+    df["put_cluster"]  = df["put_wall_strength"].rolling(3, center=True, min_periods=1).sum()
+
+    call_wall = df.loc[df["call_cluster"].idxmax(), "strike"] if df["call_cluster"].max() > 0 else spot + 100
+    put_wall  = df.loc[df["put_cluster"].idxmax(), "strike"]  if df["put_cluster"].max() > 0 else spot - 100
 
     return call_wall, put_wall
 
@@ -134,16 +150,42 @@ def compute_flip_level(df, spot):
     return near.loc[near["diff"].idxmin(), "strike"]
 
 
-def recompute_trend(spot_history, spot, expected_move):
-    if len(spot_history) < 10:
-        return {"trending": False, "direction": None, "move_pts": 0, "duration_minutes": 0}
-    window = list(spot_history)[-TREND_WINDOW_MINUTES:]
+def recompute_trend(spot_history, spot, expected_move, session_high=None, session_low=None):
+    """Recompute trend with pullback detection (deque + session H/L)."""
+    history = list(spot_history)
+    base = {"trending": False, "direction": None, "move_pts": 0,
+            "duration_minutes": 0, "pullback": False,
+            "broader_direction": None, "broader_move_pts": 0}
+    if len(history) < 10:
+        return base
+    window = history[-TREND_WINDOW_MINUTES:]
     move = spot - window[0]
     threshold = expected_move * TREND_MIN_MOVE_MULT
+    broad_move = spot - history[0]
+    broad_direction = "UP" if broad_move > 0 else "DOWN" if broad_move < 0 else None
+    broad_abs = round(abs(broad_move), 1)
     if abs(move) >= threshold:
-        return {"trending": True, "direction": "UP" if move > 0 else "DOWN",
-                "move_pts": round(abs(move), 1), "duration_minutes": len(window)}
-    return {"trending": False, "direction": None, "move_pts": 0, "duration_minutes": 0}
+        direction = "UP" if move > 0 else "DOWN"
+        pullback = (direction != broad_direction and abs(broad_move) >= threshold)
+        if not pullback and session_high is not None and session_low is not None:
+            session_range = session_high - session_low
+            if session_range >= threshold * 2:
+                position = (spot - session_low) / session_range
+                rally_from_low = spot - session_low
+                drop_from_high = session_high - spot
+                if direction == "DOWN" and position > 0.5 and rally_from_low > abs(move) * 2:
+                    pullback = True
+                    broad_direction = "UP"
+                    broad_abs = round(rally_from_low, 1)
+                elif direction == "UP" and position < 0.5 and drop_from_high > abs(move) * 2:
+                    pullback = True
+                    broad_direction = "DOWN"
+                    broad_abs = round(drop_from_high, 1)
+        return {"trending": True, "direction": direction,
+                "move_pts": round(abs(move), 1), "duration_minutes": len(window),
+                "pullback": pullback, "broader_direction": broad_direction,
+                "broader_move_pts": broad_abs}
+    return {**base, "broader_direction": broad_direction, "broader_move_pts": broad_abs}
 
 
 def identify_swings(spots, timestamps, min_pts=25):
@@ -199,7 +241,7 @@ def run_one_day(options_path, min_pts=25):
 
     date_label = os.path.basename(options_path)
 
-    spot_history = deque(maxlen=TREND_WINDOW_MINUTES)
+    spot_history = deque(maxlen=60)
     gamma_history = deque(maxlen=10)
     straddle_history = deque(maxlen=10)
     oi_vel_history = deque(maxlen=30)
@@ -208,6 +250,8 @@ def run_one_day(options_path, min_pts=25):
     results = []
     spots = []
     timestamps = []
+    session_high = None
+    session_low = None
 
     for snap in snapshots:
         spot = snap["spot"]
@@ -222,6 +266,10 @@ def run_one_day(options_path, min_pts=25):
         spots.append(spot)
         timestamps.append(timestamp)
         spot_history.append(spot)
+        if session_high is None or spot > session_high:
+            session_high = spot
+        if session_low is None or spot < session_low:
+            session_low = spot
         gamma_history.append(gamma)
         straddle_history.append(straddle)
 
@@ -295,7 +343,7 @@ def run_one_day(options_path, min_pts=25):
 
         # Trend
         expected_move = straddle / 2
-        trend = recompute_trend(spot_history, spot, expected_move)
+        trend = recompute_trend(spot_history, spot, expected_move, session_high, session_low)
 
         # MPM
         move_prob = compute_move_probability(
@@ -318,7 +366,9 @@ def run_one_day(options_path, min_pts=25):
             "iv_premium":        _score_iv(momentum_data, straddle, days_to_expiry),
             "move_prob":         _score_move_prob(move_prob),
             "structural_event":  _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze),
-            "trend":             _score_trend(trend, spot_history=list(spot_history)),
+            "trend":             _score_trend(trend, spot_history=list(spot_history),
+                                             spot=spot, session_high=session_high,
+                                             session_low=session_low),
         }
 
         total = sum(scores[k] * W[k] for k in scores)
@@ -331,6 +381,7 @@ def run_one_day(options_path, min_pts=25):
         direction, _ = _resolve_direction(
             bias, move_prob, flip_breakout, vacuum,
             wall_break_vac, liq_accel, trend, velocity,
+            spot=spot, session_high=session_high, session_low=session_low,
         )
 
         if bias == "RANGE" and direction != "NEUTRAL":

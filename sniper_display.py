@@ -447,7 +447,8 @@ def _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze)
     return min(1.0, score)
 
 
-def _score_trend(trend, spot_history=None):
+def _score_trend(trend, spot_history=None, spot=None,
+                 session_high=None, session_low=None):
     """
     Pure price-action trend score — fallback when OI-derived signals lag.
     Uses detect_persistent_trend() output + live ROC from spot_history.
@@ -458,9 +459,15 @@ def _score_trend(trend, spot_history=None):
     if not trend or not trend.get("trending"):
         return 0.0
 
+    # Pullback = retrace within a larger move — don't score the short window
+    if trend.get("pullback"):
+        return 0.0
+
     pts = trend.get("move_pts", 0)
     duration = trend.get("duration_minutes", 0)
     trend_dir = trend.get("direction")  # "UP" or "DOWN"
+
+    # (no score-level exhaustion guard — direction resolver handles extremes)
 
     # ── Live momentum check (roc1) ──────────────────────────
     # If spot moved < 10pts in trend direction in the last candle,
@@ -634,8 +641,8 @@ def _classify_setup(vacuum, wall_break_vac, flip_breakout, liq_accel,
     if trap and trap.get("confidence", 0) >= 70 and gamma >= 0:
         return "TRAP FADE"
 
-    # Trend continuation
-    if trend and trend.get("trending"):
+    # Trend continuation — but NOT pullbacks
+    if trend and trend.get("trending") and not trend.get("pullback"):
         pts = trend.get("move_pts", 0)
         if pts >= 15:
             return "TREND CONTINUATION"
@@ -669,14 +676,17 @@ def _classify_setup(vacuum, wall_break_vac, flip_breakout, liq_accel,
 # ─────────────────────────────────────────────────────────────
 
 def _resolve_direction(bias, move_prob, flip_breakout, vacuum,
-                       wall_break_vac, liq_accel, trend, velocity):
+                       wall_break_vac, liq_accel, trend, velocity,
+                       spot=None, session_high=None, session_low=None):
     """
     Returns (direction_str, direction_color).
     Structural events override bias.
+    Trend is demoted when it's a pullback within a larger move.
+    Trend is suppressed at session extremes (exhaustion guard).
     """
     direction = None
 
-    # Structural events carry their own direction
+    # Structural events carry their own direction (highest priority)
     if not direction and flip_breakout and flip_breakout.get("detected"):
         direction = flip_breakout["direction"]
     elif not direction and liq_accel and liq_accel.get("detected") and liq_accel.get("conviction") == "HIGH":
@@ -685,8 +695,16 @@ def _resolve_direction(bias, move_prob, flip_breakout, vacuum,
         direction = vacuum.get("direction")
     elif not direction and wall_break_vac and wall_break_vac.get("detected"):
         direction = wall_break_vac.get("direction")
-    elif not direction and trend and trend.get("trending"):
-        direction = trend["direction"]
+
+    # Trend — only if NOT a pullback
+    if not direction and trend and trend.get("trending"):
+        if trend.get("pullback"):
+            # Pullback: use the BROADER direction instead of the short-window one
+            broader = trend.get("broader_direction")
+            if broader:
+                direction = broader
+        else:
+            direction = trend["direction"]
 
     # Fall back to move_prob direction
     if not direction and move_prob:
@@ -702,6 +720,18 @@ def _resolve_direction(bias, move_prob, flip_breakout, vacuum,
             direction = "UP"
         elif bias == "BEARISH":
             direction = "DOWN"
+
+    # Final exhaustion override — applies to ALL direction sources
+    # Suppress direction when pushing into a session extreme
+    if (direction and spot is not None
+            and session_high is not None and session_low is not None):
+        session_range = session_high - session_low
+        if session_range >= 50:
+            position = (spot - session_low) / session_range
+            if direction in ("DOWN", "DOWNSIDE", "BEARISH") and position < 0.15:
+                direction = None
+            elif direction in ("UP", "UPSIDE", "BULLISH") and position > 0.85:
+                direction = None
 
     # Map to display
     if direction in ("UP", "UPSIDE", "BULLISH"):
@@ -814,6 +844,8 @@ def sniper_display(
     # ── Compute gamma momentum ─────────────────────────────────
     gamma_mom = compute_gamma_momentum(gamma_history)
 
+    from state import state as _st
+
     # ── Score each signal ──────────────────────────────────────
     scores = {
         "gamma_structure":   _score_gamma(gamma, flip_level, spot, call_wall, put_wall),
@@ -824,7 +856,9 @@ def sniper_display(
         "iv_premium":        _score_iv(momentum_data, straddle, days_to_expiry),
         "move_prob":         _score_move_prob(move_prob),
         "structural_event":  _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze),
-        "trend":             _score_trend(trend, spot_history=spot_history),
+        "trend":             _score_trend(trend, spot_history=spot_history,
+                                         spot=spot, session_high=_st.session_high,
+                                         session_low=_st.session_low),
     }
 
     # Weighted total (0-10)
@@ -839,6 +873,7 @@ def sniper_display(
     direction, dir_color = _resolve_direction(
         bias, move_prob, flip_breakout, vacuum,
         wall_break_vac, liq_accel, trend, velocity,
+        spot=spot, session_high=_st.session_high, session_low=_st.session_low,
     )
 
     # ── Fix 4: Direction conflict penalty ──────────────────────

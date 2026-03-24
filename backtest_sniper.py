@@ -109,24 +109,42 @@ def load_options_snapshots(options_path):
     return snapshots
 
 
-def recompute_trend(spot_history, spot, expected_move):
-    """Recompute trend from spot history using current config thresholds."""
-    if len(spot_history) < 10:
-        return {"trending": False, "direction": None, "move_pts": 0, "duration_minutes": 0}
-
-    window = list(spot_history)[-TREND_WINDOW_MINUTES:]
+def recompute_trend(spot_history, spot, expected_move, session_high=None, session_low=None):
+    """Recompute trend with pullback detection (deque + session H/L)."""
+    history = list(spot_history)
+    base = {"trending": False, "direction": None, "move_pts": 0,
+            "duration_minutes": 0, "pullback": False,
+            "broader_direction": None, "broader_move_pts": 0}
+    if len(history) < 10:
+        return base
+    window = history[-TREND_WINDOW_MINUTES:]
     move = spot - window[0]
     threshold = expected_move * TREND_MIN_MOVE_MULT
-
+    broad_move = spot - history[0]
+    broad_direction = "UP" if broad_move > 0 else "DOWN" if broad_move < 0 else None
+    broad_abs = round(abs(broad_move), 1)
     if abs(move) >= threshold:
         direction = "UP" if move > 0 else "DOWN"
-        return {
-            "trending": True,
-            "direction": direction,
-            "move_pts": round(abs(move), 1),
-            "duration_minutes": len(window),
-        }
-    return {"trending": False, "direction": None, "move_pts": 0, "duration_minutes": 0}
+        pullback = (direction != broad_direction and abs(broad_move) >= threshold)
+        if not pullback and session_high is not None and session_low is not None:
+            session_range = session_high - session_low
+            if session_range >= threshold * 2:
+                position = (spot - session_low) / session_range
+                rally_from_low = spot - session_low
+                drop_from_high = session_high - spot
+                if direction == "DOWN" and position > 0.5 and rally_from_low > abs(move) * 2:
+                    pullback = True
+                    broad_direction = "UP"
+                    broad_abs = round(rally_from_low, 1)
+                elif direction == "UP" and position < 0.5 and drop_from_high > abs(move) * 2:
+                    pullback = True
+                    broad_direction = "DOWN"
+                    broad_abs = round(drop_from_high, 1)
+        return {"trending": True, "direction": direction,
+                "move_pts": round(abs(move), 1), "duration_minutes": len(window),
+                "pullback": pullback, "broader_direction": broad_direction,
+                "broader_move_pts": broad_abs}
+    return {**base, "broader_direction": broad_direction, "broader_move_pts": broad_abs}
 
 
 def normalise_timestamp(ts):
@@ -215,13 +233,15 @@ def run_backtest(signals_path):
     print(f"{'='*70}\n")
 
     # ── Pass 1: Score every row ──────────────────────────────────────
-    spot_history = deque(maxlen=TREND_WINDOW_MINUTES)
+    spot_history = deque(maxlen=60)
     gamma_history = deque(maxlen=10)
     prev_spot = None
     prev_df = None
     results = []
     spots = []
     timestamps = []
+    session_high = None
+    session_low = None
 
     for row in rows:
         spot = parse_float(row["spot"])
@@ -241,6 +261,10 @@ def run_backtest(signals_path):
         spots.append(spot)
         timestamps.append(timestamp)
         spot_history.append(spot)
+        if session_high is None or spot > session_high:
+            session_high = spot
+        if session_low is None or spot < session_low:
+            session_low = spot
         gamma_history.append(gamma)
 
         # Reconstruct momentum_data
@@ -304,7 +328,7 @@ def run_backtest(signals_path):
 
         # ── Recompute trend with NEW thresholds ──────────────────────
         expected_move = straddle / 2
-        trend = recompute_trend(spot_history, spot, expected_move)
+        trend = recompute_trend(spot_history, spot, expected_move, session_high, session_low)
 
         # ── Recompute MPM with trend + structural events ─────────────
         move_prob = compute_move_probability(
@@ -327,7 +351,9 @@ def run_backtest(signals_path):
             "iv_premium":        _score_iv(momentum_data, straddle, days_to_expiry),
             "move_prob":         _score_move_prob(move_prob),
             "structural_event":  _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze),
-            "trend":             _score_trend(trend, spot_history=list(spot_history)),
+            "trend":             _score_trend(trend, spot_history=list(spot_history),
+                                             spot=spot, session_high=session_high,
+                                             session_low=session_low),
         }
 
         total = sum(scores[k] * W[k] for k in scores)
@@ -340,6 +366,7 @@ def run_backtest(signals_path):
         direction, _ = _resolve_direction(
             bias, move_prob, flip_breakout, vacuum,
             wall_break_vac, liq_accel, trend, velocity,
+            spot=spot, session_high=session_high, session_low=session_low,
         )
 
         # Direction conflict penalty

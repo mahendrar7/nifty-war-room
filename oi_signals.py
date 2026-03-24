@@ -212,7 +212,8 @@ def best_option_to_buy(df, spot):
     return df.loc[df["call_score"].idxmax(), "strike"], df.loc[df["put_score"].idxmax(), "strike"]
 
 
-def compute_market_bias(spot, gravity, call_wall, put_wall, oi_signal, pcr_signal):
+def compute_market_bias(spot, gravity, call_wall, put_wall, oi_signal, pcr_signal,
+                        trend=None):
     score = 0
     score += 1 if spot > gravity else -1
     score += 1 if abs(spot - put_wall) < abs(call_wall - spot) else -1
@@ -222,6 +223,14 @@ def compute_market_bias(spot, gravity, call_wall, put_wall, oi_signal, pcr_signa
 
     if   pcr_signal == "BULLISH": score += 2
     elif pcr_signal == "BEARISH": score -= 2
+
+    # Price-action trend boost — when spot is trending hard, OI may lag
+    # but bias should reflect reality.  Scaled by move size.
+    if trend and trend["trending"]:
+        move = trend["move_pts"]
+        if move >= 30:
+            boost = 2 if move >= 60 else 1
+            score += boost if trend["direction"] == "UP" else -boost
 
     if   score >= 3:  bias = "BULLISH"
     elif score <= -3: bias = "BEARISH"

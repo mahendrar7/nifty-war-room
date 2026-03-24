@@ -15,46 +15,85 @@ from config import CSV_FILE
 # REGIME TRACKER
 # =============================================================================
 class RegimeTracker:
+    """
+    Dampens regime and bias flips with N-candle confirmation.
+    Raw signals flip every tick; confirmed signals only change after
+    `min_confirm` consecutive candles agree on a new value.
+
+    Tracks bias and regime independently so a regime can change
+    (e.g. PINNING → VOL EXPANSION) even if bias stays RANGE.
+    """
     def __init__(self, min_confirm=3):
         self.min_confirm          = min_confirm
+        # Confirmed state — what downstream consumers see
         self.confirmed_bias       = "RANGE"
         self.confirmed_regime     = "UNCLEAR"
         self.confirmed_action     = "WAIT"
         self.confirmed_confidence = 0
+        # Bias candidate tracking
         self.candidate_bias       = None
-        self.candidate_count      = 0
+        self.candidate_bias_count = 0
+        # Regime candidate tracking
+        self.candidate_regime       = None
+        self.candidate_regime_count = 0
         self.stable_minutes       = 0
 
     def update(self, new_bias, new_regime, new_action, new_confidence):
+        # ── Bias hysteresis ──────────────────────────────────────────
         if new_bias == self.confirmed_bias:
-            self.candidate_bias  = None
-            self.candidate_count = 0
+            self.candidate_bias       = None
+            self.candidate_bias_count = 0
             self.stable_minutes += 1
         else:
             if new_bias == self.candidate_bias:
-                self.candidate_count += 1
+                self.candidate_bias_count += 1
             else:
-                self.candidate_bias  = new_bias
-                self.candidate_count = 1
+                self.candidate_bias       = new_bias
+                self.candidate_bias_count = 1
 
-            if self.candidate_count >= self.min_confirm:
+            if self.candidate_bias_count >= self.min_confirm:
                 self.confirmed_bias       = new_bias
-                self.confirmed_regime     = new_regime
-                self.confirmed_action     = new_action
-                self.confirmed_confidence = new_confidence
                 self.candidate_bias       = None
-                self.candidate_count      = 0
+                self.candidate_bias_count = 0
                 self.stable_minutes       = 0
 
-        if new_bias == self.confirmed_bias:
-            self.confirmed_regime     = new_regime
+        # ── Regime hysteresis ────────────────────────────────────────
+        if new_regime == self.confirmed_regime:
+            self.candidate_regime       = None
+            self.candidate_regime_count = 0
+        else:
+            if new_regime == self.candidate_regime:
+                self.candidate_regime_count += 1
+            else:
+                self.candidate_regime       = new_regime
+                self.candidate_regime_count = 1
+
+            if self.candidate_regime_count >= self.min_confirm:
+                self.confirmed_regime       = new_regime
+                self.candidate_regime       = None
+                self.candidate_regime_count = 0
+
+        # Action and confidence always follow confirmed regime's latest values
+        if new_regime == self.confirmed_regime:
             self.confirmed_action     = new_action
             self.confirmed_confidence = new_confidence
 
         return (self.confirmed_bias, self.confirmed_regime,
                 self.confirmed_action, self.confirmed_confidence,
-                self.candidate_bias, self.candidate_count,
+                self.candidate_bias, self.candidate_bias_count,
                 self.stable_minutes)
+
+    def force(self, bias, regime, action, confidence):
+        """Structural bypass — immediately confirm without waiting."""
+        self.confirmed_bias       = bias
+        self.confirmed_regime     = regime
+        self.confirmed_action     = action
+        self.confirmed_confidence = confidence
+        self.candidate_bias       = None
+        self.candidate_bias_count = 0
+        self.candidate_regime       = None
+        self.candidate_regime_count = 0
+        self.stable_minutes       = 0
 
 
 # =============================================================================
@@ -87,6 +126,8 @@ class MarketState:
 
         # NEW: spot history for trend detection
         self.spot_history        = deque(maxlen=60)  # last 60 minutes
+        self.session_high        = None              # intraday high
+        self.session_low         = None              # intraday low
 
         # NEW: gamma history for momentum / rate-of-change tracking
         self.gamma_history       = deque(maxlen=10)  # last 10 candles
@@ -124,6 +165,8 @@ class MarketState:
         self.call_wall_history.clear()
         self.put_wall_history.clear()
         self.spot_history.clear()
+        self.session_high        = None
+        self.session_low         = None
         self.hw_history.clear()
         self.throttle_cache.clear()
         self.tick_counter        = 0
@@ -198,7 +241,30 @@ def restore_state_from_csv(debug_mode=False, csv_file=CSV_FILE):
             straddle = atm_row["call_ltp"].values[0] + atm_row["put_ltp"].values[0]
             state.straddle_history.append((datetime.now(), straddle))
 
-        print(f"✅ State restored from CSV ({len(snapshots)} snapshots)")
+        # Restore spot_history and session high/low from spot column
+        if "spot" in df.columns:
+            spot_series = df.groupby("timestamp")["spot"].first().sort_index()
+            # Use last 60 spots for history
+            for sp in spot_series.values[-60:]:
+                state.spot_history.append(float(sp))
+            # Session high/low from ALL data in file (not just 30-min cutoff)
+            try:
+                with open(csv_file, "r") as f2:
+                    full_lines = list(deque(f2, 20000))
+                full_df = pd.read_csv(
+                    pd.io.common.StringIO("".join(full_lines)),
+                    on_bad_lines="skip"
+                )
+                if "spot" in full_df.columns:
+                    all_spots = full_df["spot"].dropna()
+                    if len(all_spots) > 0:
+                        state.session_high = float(all_spots.max())
+                        state.session_low  = float(all_spots.min())
+            except Exception:
+                pass  # session high/low not critical
+
+        print(f"✅ State restored from CSV ({len(snapshots)} snapshots, "
+              f"{len(state.spot_history)} spots)")
 
     except Exception as e:
         import traceback

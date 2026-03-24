@@ -334,23 +334,29 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     else:
         best_call, best_put = get_cached("best_option", (atm + 100, atm - 100))
 
-    bias, confidence = compute_market_bias(
-        spot, gravity, call_wall, put_wall, oi_signal, pcr_signal
-    )
-
     # FIX: use actual previous spot price, not call_ltp mean
     prev_spot = state.previous_spot
     # Track spot history for trend detection
     state.spot_history.append(spot)
+    # Track session high/low
+    if state.session_high is None or spot > state.session_high:
+        state.session_high = spot
+    if state.session_low is None or spot < state.session_low:
+        state.session_low = spot
     # Track gamma history for momentum / rate-of-change
     state.gamma_history.append(gamma)
 
     days_to_expiry = (expiry - datetime.now().date()).days
     momentum_5m = momentum_data["momentum_5m"] if momentum_data else None
 
-    # FIX: Trend detection — feeds into trap suppression and trade suggestion
+    # Trend detection — computed BEFORE bias so price action can influence bias
     expected_move = straddle / 2
     trend = detect_persistent_trend(spot, expected_move)
+
+    bias, confidence = compute_market_bias(
+        spot, gravity, call_wall, put_wall, oi_signal, pcr_signal,
+        trend=trend,
+    )
 
     # Trap — throttled to 5 minutes
     if should_compute("trap"):
@@ -439,47 +445,59 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
                                               "conviction": "LOW", "active_signals": [],
                                               "reasons": [], "conflicted": False})
 
-    regime, action = interpret_market(
+    raw_regime, raw_action = interpret_market(
         spot, atm, bias, confidence, gamma, gamma_flip,
         trap_prob, count, momentum_data, oi_signal,
-        vacuum=vacuum, velocity=velocity,
+        vacuum=vacuum, velocity=velocity, trend=trend,
     )
 
-    # ── Structural bypass — skip 3-candle confirmation delay ──────────────
+    # ── Structural bypass — skip confirmation, force immediately ─────────
     bypassed = False
 
     if flip_breakout and flip_breakout["detected"]:
         fb_dir = flip_breakout["direction"]
-        regime = "VOLATILITY EXPANSION"
-        action = (f"TREND FOLLOW {fb_dir} — GAMMA FLIP BREAKOUT CONFIRMED | "
-                  f"Flip level {flip_breakout['flip_level']}")
+        raw_regime = "VOLATILITY EXPANSION"
+        raw_action = (f"TREND FOLLOW {fb_dir} — GAMMA FLIP BREAKOUT CONFIRMED | "
+                      f"Flip level {flip_breakout['flip_level']}")
         bypassed = True
 
     elif vacuum and vacuum["status"] == "CONFIRMED" and vacuum["score"] >= 60:
         d = vacuum["direction"]
         target = vacuum["target_wall"]
-        regime = "LIQUIDITY VACUUM"
-        action = f"FOLLOW {d} MOVE — TARGET {target}" if target else f"FOLLOW {d} MOVE"
+        raw_regime = "LIQUIDITY VACUUM"
+        raw_action = f"FOLLOW {d} MOVE — TARGET {target}" if target else f"FOLLOW {d} MOVE"
         bypassed = True
 
     elif wall_break_vac and wall_break_vac["detected"]:
         d = wall_break_vac["direction"]
         target = wall_break_vac["target_wall"]
-        regime = "LIQUIDITY VACUUM"
-        action = (f"WALL BREAK — FOLLOW {d} | "
-                  + (f"Target {target}" if target else "Next wall is target"))
+        raw_regime = "LIQUIDITY VACUUM"
+        raw_action = (f"WALL BREAK — FOLLOW {d} | "
+                      + (f"Target {target}" if target else "Next wall is target"))
         bypassed = True
 
     elif gamma < 0 and momentum_5m is not None and momentum_5m > 2.0:
-        regime = "VOLATILITY EXPANSION"
-        action = "TREND MODE — NEGATIVE GAMMA + IV EXPANDING"
+        raw_regime = "VOLATILITY EXPANSION"
+        raw_action = "TREND MODE — NEGATIVE GAMMA + IV EXPANDING"
         bypassed = True
 
     elif liq_accel and liq_accel["detected"] and liq_accel["conviction"] == "HIGH":
         d = liq_accel["direction"]
-        regime = "VOLATILITY EXPANSION"
-        action = f"LIQUIDITY ACCELERATION {d} — LAUNCH PHASE DETECTED"
+        raw_regime = "VOLATILITY EXPANSION"
+        raw_action = f"LIQUIDITY ACCELERATION {d} — LAUNCH PHASE DETECTED"
         bypassed = True
+
+    # ── Feed through regime tracker (dampens flips) ──────────────────────
+    if bypassed:
+        state.regime_tracker.force(bias, raw_regime, raw_action, confidence)
+    else:
+        state.regime_tracker.update(bias, raw_regime, raw_action, confidence)
+
+    rt = state.regime_tracker
+    bias       = rt.confirmed_bias
+    regime     = rt.confirmed_regime
+    action     = rt.confirmed_action
+    confidence = rt.confirmed_confidence
 
     state.previous_gamma = gamma
     state.previous_spot  = spot   # FIX: store actual spot for next tick
@@ -548,12 +566,11 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         print(f"Straddle:{round(straddle, 1)}  ±{round(straddle / 2, 1)}")
 
     # Row 4: Bias / Regime
-    rt = state.regime_tracker
     if bypassed:
         tracker_tag = f"  {Fore.LIGHTCYAN_EX}[⚡ structural bypass]{Style.RESET_ALL}"
-    elif rt.candidate_bias and rt.candidate_count > 0:
+    elif rt.candidate_bias and rt.candidate_bias_count > 0:
         tracker_tag = (f"  {Fore.YELLOW}({rt.candidate_bias} "
-                       f"{rt.candidate_count}/{rt.min_confirm}){Style.RESET_ALL}")
+                       f"{rt.candidate_bias_count}/{rt.min_confirm}){Style.RESET_ALL}")
     else:
         tracker_tag = f"  {Fore.WHITE}[{rt.stable_minutes}m]{Style.RESET_ALL}"
     print(f"{colored_bias(bias)}  Conf:{confidence}%{tracker_tag}  │  {regime}")
@@ -819,15 +836,16 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     sniper_action = sniper_result.get("action", "") if sniper_result else ""
 
     if sniper_action in ("TAKE TRADE", "SEND IT") and state.active_trade is None:
-        sniper_dir = sniper_result["direction"]   # "LONG" or "SHORT"
-        trade_direction = "CALL" if sniper_dir == "LONG" else "PUT"
-        trade = suggest_trade(
-            spot=spot, straddle=straddle, direction=trade_direction,
-            df=df, gamma=gamma, flip_level=flip_level,
-            regime=regime, confidence=confidence,
-            ml_signal=ml_signal, days_to_expiry=days_to_expiry,
-            sniper_setup=sniper_result.get("setup"),
-        )
+        sniper_dir = sniper_result["direction"]   # "LONG", "SHORT", or "NEUTRAL"
+        if sniper_dir != "NEUTRAL":
+            trade_direction = "CALL" if sniper_dir == "LONG" else "PUT"
+            trade = suggest_trade(
+                spot=spot, straddle=straddle, direction=trade_direction,
+                df=df, gamma=gamma, flip_level=flip_level,
+                regime=regime, confidence=confidence,
+                ml_signal=ml_signal, days_to_expiry=days_to_expiry,
+                sniper_setup=sniper_result.get("setup"),
+            )
 
     if trade:
         t = trade
