@@ -558,28 +558,41 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         tracker_tag = f"  {Fore.WHITE}[{rt.stable_minutes}m]{Style.RESET_ALL}"
     print(f"{colored_bias(bias)}  Conf:{confidence}%{tracker_tag}  │  {regime}")
 
-    # Conditional context
-    if pcr_signal != "NEUTRAL":
-        pcr_color = Fore.GREEN if pcr_signal == "BULLISH" else Fore.RED
-        print(pcr_color + f"PCR:{pcr_val} ({pcr_signal})" + Style.RESET_ALL)
+    # Row 5: Heavyweights — top 3 movers + weighted ROC
+    if hw_momentum is not None:
+        hw = hw_momentum
+        hw_color = Fore.GREEN if hw["direction"] == "BULLISH" else (Fore.RED if hw["direction"] == "BEARISH" else Fore.WHITE)
+        top3 = "  ".join(
+            f"{m['name']}:{m['roc']:+.2f}%" for m in hw["movers"][:3]
+        )
+        stall_tag = ""
+        if hw_stall and hw_stall["stalled"]:
+            stall_tag = f"  {Fore.YELLOW}STALLED{Style.RESET_ALL}"
+        print(hw_color + f"HW:{hw['weighted_roc']:+.3f}% {hw['direction']}  {top3}{stall_tag}" + Style.RESET_ALL)
 
-    atm_row = df[df["strike"] == atm]
-    if not atm_row.empty:
-        c_iv = atm_row["call_iv"].values[0]
-        p_iv = atm_row["put_iv"].values[0]
-        if c_iv is not None and p_iv is not None and abs(c_iv - p_iv) > 0.03:
-            skew_color = Fore.RED if p_iv > c_iv else Fore.GREEN
-            print(skew_color +
-                  f"IV Skew  C:{c_iv * 100:.1f}%  P:{p_iv * 100:.1f}%  "
-                  f"({'put skew — bearish lean' if p_iv > c_iv else 'call skew — bullish lean'})"
-                  + Style.RESET_ALL)
+    # Conditional context — debug only
+    if DEBUG_MODE:
+        if pcr_signal != "NEUTRAL":
+            pcr_color = Fore.GREEN if pcr_signal == "BULLISH" else Fore.RED
+            print(pcr_color + f"PCR:{pcr_val} ({pcr_signal})" + Style.RESET_ALL)
 
-    if oi_imbalance:
-        print(Fore.BLUE + f"OI: {oi_imbalance}" + Style.RESET_ALL)
-    if abs(spot - gamma_wall) <= 50:
-        print(Fore.BLUE + f"Gamma Wall:{gamma_wall} ({abs(spot - gamma_wall):.0f}pts)" + Style.RESET_ALL)
-    if war_strike:
-        print(Fore.YELLOW + f"Strike War: {war_strike}" + Style.RESET_ALL)
+        atm_row = df[df["strike"] == atm]
+        if not atm_row.empty:
+            c_iv = atm_row["call_iv"].values[0]
+            p_iv = atm_row["put_iv"].values[0]
+            if c_iv is not None and p_iv is not None and abs(c_iv - p_iv) > 0.03:
+                skew_color = Fore.RED if p_iv > c_iv else Fore.GREEN
+                print(skew_color +
+                      f"IV Skew  C:{c_iv * 100:.1f}%  P:{p_iv * 100:.1f}%  "
+                      f"({'put skew — bearish lean' if p_iv > c_iv else 'call skew — bullish lean'})"
+                      + Style.RESET_ALL)
+
+        if oi_imbalance:
+            print(Fore.BLUE + f"OI: {oi_imbalance}" + Style.RESET_ALL)
+        if abs(spot - gamma_wall) <= 50:
+            print(Fore.BLUE + f"Gamma Wall:{gamma_wall} ({abs(spot - gamma_wall):.0f}pts)" + Style.RESET_ALL)
+        if war_strike:
+            print(Fore.YELLOW + f"Strike War: {war_strike}" + Style.RESET_ALL)
 
     # ==========================================================================
     # TRIGGERS
@@ -731,33 +744,17 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     # ==========================================================================
     print_divider()
 
-    # Show trend status if detected
-    if trend and trend["trending"]:
-        trend_color = Fore.GREEN if trend["direction"] == "UP" else Fore.RED
-        trend_arrow = "📈" if trend["direction"] == "UP" else "📉"
-        print(trend_color +
-              f"{trend_arrow} TREND: {trend['direction']} "
-              f"{trend['move_pts']}pts over {trend['duration_minutes']}min"
-              + Style.RESET_ALL)
-
     print(Fore.GREEN + f"ACTION: {action}" + Style.RESET_ALL)
 
-    # ML
-    if state.last_ml_result is not None:
+    # ML — compact: label + agree/conflict only
+    if state.last_ml_result is not None and state.last_ml_result["signal"] != 0:
         lr = state.last_ml_result
-        ml_color = (Fore.GREEN if lr["signal"] == 1
-                    else Fore.RED if lr["signal"] == -1
-        else Fore.WHITE)
-        mins_left = 15 - (datetime.now().minute % 15)
-        agree_tag = ""
-        if lr["signal"] != 0:
-            if _ml_bias_to_str(lr["signal"]) == bias:
-                agree_tag = f"  {Fore.GREEN}✅ AGREES{Style.RESET_ALL}"
-            else:
-                agree_tag = f"  {Fore.YELLOW}⚠ CONFLICTS{Style.RESET_ALL}"
+        ml_color = Fore.GREEN if lr["signal"] == 1 else Fore.RED
+        agree_tag = (f"  {Fore.GREEN}✅" if _ml_bias_to_str(lr["signal"]) == bias
+                     else f"  {Fore.YELLOW}⚠")
         print(ml_color +
-              f"ML: {lr['label']}  ({lr['confidence']:.0%})  ±{lr['x_points']:.0f}pts"
-              + Style.RESET_ALL + agree_tag + f"  next:{mins_left}m")
+              f"ML: {lr['label']}  ({lr['confidence']:.0%})"
+              + Style.RESET_ALL + agree_tag + Style.RESET_ALL)
 
     # Hold the line — active trade OR shadow mode on last suggestion
     htl = None
@@ -789,64 +786,16 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
               f"Stop:{htl['stop_suggestion']}{reason_str}" + Style.RESET_ALL)
         if hw_tag:
             print(Fore.CYAN + f"   {hw_tag}" + Style.RESET_ALL)
-        else:
-            hw_have = len(state.hw_history)
-            hw_need = HW_ROC_WINDOW + 1
-            if hw_have < hw_need:
-                print(Fore.YELLOW +
-                      f"   HW: warming up ({hw_have}/{hw_need} candles)"
-                      + Style.RESET_ALL)
         print(f"   Active: {at['strike']} {at['option_type']} "
               f"@ ₹{at['entry_price']:.0f}  entered {at.get('entry_time', '?')}")
 
         if verdict == "EXIT":
             notify(
                 f"🚨 EXIT: {at['strike']} {at['option_type']} | "
-                f"Score:{htl['hold_score']} | "
+                f"Spot:{spot:.0f} | Score:{htl['hold_score']} | "
                 + " | ".join(htl["exit_reasons"][:2])
             )
             state.active_trade = None
-
-    elif state.last_suggestion is not None:
-        # ── Shadow HTL: no logged trade, but we have a suggestion ────────
-        # Shows what HTL *would* say if you'd entered on the last suggestion.
-        # No auto-exit, no Telegram — informational only.
-        htl_source = "shadow"
-        ls = state.last_suggestion
-        shadow_dir = ls["option_type"]   # "CE" or "PE"
-        wall_distance = compute_next_wall_distance(df, spot, shadow_dir)
-        htl = hold_the_line(
-            gamma=gamma, momentum_data=momentum_data,
-            next_wall_distance=wall_distance,
-            trade_direction=shadow_dir,
-            oi_signal=oi_signal, prev_gamma=state.previous_gamma,
-            hw_momentum=hw_momentum, hw_roc_trend=hw_roc_trend,
-            hw_stall=hw_stall,
-        )
-        verdict = htl["verdict"]
-        htl_color = (Fore.GREEN if verdict == "HOLD"
-                     else Fore.YELLOW if verdict == "TRAIL"
-        else Fore.RED)
-        htl_emoji = {"HOLD": "📈", "TRAIL": "⚠", "EXIT": "🚨"}[verdict]
-        top_reason = (htl["exit_reasons"] or htl["trail_reasons"] or htl["hold_reasons"])
-        reason_str = f"  {top_reason[0][:60]}" if top_reason else ""
-        hw_tag = f"  HW:{htl['hw_summary']}" if htl.get("hw_summary") else ""
-        print(htl_color +
-              f"{htl_emoji} SHADOW HTL: {verdict}  Score:{htl['hold_score']}  "
-              f"{reason_str}" + Style.RESET_ALL)
-        if hw_tag:
-            print(Fore.CYAN + f"   {hw_tag}" + Style.RESET_ALL)
-        else:
-            hw_have = len(state.hw_history)
-            hw_need = HW_ROC_WINDOW + 1
-            if hw_have < hw_need:
-                print(Fore.YELLOW +
-                      f"   HW: warming up ({hw_have}/{hw_need} candles)"
-                      + Style.RESET_ALL)
-        print(Fore.WHITE +
-              f"   (tracking {ls['strike']} {ls['option_type']} "
-              f"₹{ls['price']:.0f} — not logged, press Meta+I to enter)"
-              + Style.RESET_ALL)
 
     # SNIPER — decides WHETHER to trade and DIRECTION
     sniper_result = sniper_display(
@@ -897,7 +846,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
             "trade_type": t.get("trade_type", "directional"),
         }
         print(Fore.GREEN +
-              f"  ✅ AUTO-ENTERED → HTL active  │  Meta+X / Ctrl+X → exit"
+              f"  ✅ AUTO-ENTERED → HTL active  │  /exit {_instrument_arg} to close"
               + Style.RESET_ALL)
 
         # Telegram with full trade details
@@ -1197,6 +1146,10 @@ def _write_snapshot(**kw):
             "direction": hw["direction"], "strength": hw["strength"],
             "weighted_roc": round(hw["weighted_roc"], 3),
             "aligned": hw["aligned_count"],
+            "top_movers": [
+                {"name": m["name"], "roc": round(m["roc"], 3)}
+                for m in hw["movers"][:3]
+            ],
         }
         if kw["hw_stall"] and kw["hw_stall"]["stalled"]:
             snap["heavyweights"]["stalled"] = True
@@ -1470,14 +1423,15 @@ def _process_telegram_command():
             return
         at = state.active_trade
         now_str = cmd.get("time", datetime.now().strftime("%H:%M"))
+        spot_now = state.spot_history[-1] if state.spot_history else 0
         print(f"\n{'─' * 50}")
         print(f"  {Fore.RED}🚨 TELEGRAM EXIT{Style.RESET_ALL}")
-        print(f"  {at['strike']} {at['option_type']} | "
+        print(f"  {at['strike']} {at['option_type']} | Spot:{spot_now:.0f} | "
               f"Entry ₹{at['entry_price']:.0f} @ {at['entry_time']} | Exited {now_str}")
         print(f"{'─' * 50}")
         notify(
             f"🔴 EXIT (Telegram): {at['strike']} {at['option_type']} | "
-            f"Entry ₹{at['entry_price']:.0f} @ {at['entry_time']} | Exited {now_str}"
+            f"Spot:{spot_now:.0f} | Entry ₹{at['entry_price']:.0f} @ {at['entry_time']} | Exited {now_str}"
         )
         state.active_trade = None
 
@@ -1774,13 +1728,14 @@ def _register_trade_exit():
         return
     at = state.active_trade
     now = datetime.now().strftime("%H:%M")
+    spot_now = state.spot_history[-1] if state.spot_history else 0
     print(f"\n{'─' * 50}\n  {Fore.RED}🚨 EXITED MANUALLY{Style.RESET_ALL}")
-    print(f"  {at['strike']} {at['option_type']} | "
+    print(f"  {at['strike']} {at['option_type']} | Spot:{spot_now:.0f} | "
           f"Entry ₹{at['entry_price']:.0f} @ {at['entry_time']} | Exited {now}")
     print(f"{'─' * 50}")
     notify(
         f"🔴 EXIT (manual): {at['strike']} {at['option_type']} | "
-        f"Entry ₹{at['entry_price']:.0f} @ {at['entry_time']} | Exited {now}"
+        f"Spot:{spot_now:.0f} | Entry ₹{at['entry_price']:.0f} @ {at['entry_time']} | Exited {now}"
     )
     state.active_trade = None
 

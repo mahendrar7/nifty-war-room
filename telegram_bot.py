@@ -157,14 +157,14 @@ def format_snapshot(snap):
         ml = snap["ml"]
         lines.append(f"🤖 ML: {ml['label']} ({ml['confidence']:.0%}) ±{ml['x_points']:.0f}pts")
 
-    # Heavyweights
+    # Heavyweights — match dashboard format
     if "heavyweights" in snap:
         hw = snap["heavyweights"]
-        stall = " STALLED" if hw.get("stalled") else ""
-        trend = f" {hw['roc_trend']}" if hw.get("roc_trend") else ""
-        lines.append(f"🏋️ HW: {hw['direction']} {hw['strength']} "
-                     f"wROC:{hw['weighted_roc']:+.3f}% "
-                     f"aligned:{hw['aligned']}/10{stall}{trend}")
+        top3 = "  ".join(
+            f"{m['name']}:{m['roc']:+.2f}%" for m in hw.get("top_movers", [])
+        )
+        stall = "  STALLED" if hw.get("stalled") else ""
+        lines.append(f"*HW:* {hw['weighted_roc']:+.3f}% {hw['direction']}  {top3}{stall}")
 
     return "\n".join(lines)
 
