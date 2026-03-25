@@ -1765,6 +1765,14 @@ if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
     _start_caffeinate()
     start_hotkey_listener()
+
+    # Start news scraper in background (writes data/market_feed.json every 5 min)
+    try:
+        from news_scraper import scrape_and_save
+        threading.Thread(target=scrape_and_save, args=(True,), daemon=True).start()
+    except Exception as e:
+        print(f"  ⚠ News scraper failed to start: {e}")
+
     restore_state_from_csv(csv_file=CSV_FILE)
     restore_hw_history(state.hw_history)
     run_logger()

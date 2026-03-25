@@ -99,9 +99,13 @@ def detect_persistent_trend(spot, expected_move):
 
         # Layer 2: session H/L fallback — catches pullbacks after restart
         # or when the rally origin is outside the 60-entry deque.
-        # Uses position-in-range: trending DOWN is only a pullback if spot
-        # is in the UPPER half of session range (and vice versa).
-        if not pullback and state.session_high is not None and state.session_low is not None:
+        # ONLY fires when deque is short (< 45 entries) — if we have a full
+        # deque and both windows agree on direction, trust the deque over
+        # session H/L which can be misleading on reversal days.
+        deque_short = len(history) < 45
+        deque_agrees = (direction == broad_direction)
+        if (not pullback and deque_short and not deque_agrees
+                and state.session_high is not None and state.session_low is not None):
             session_range = state.session_high - state.session_low
             if session_range >= threshold * 2:  # meaningful session range
                 position = (spot - state.session_low) / session_range  # 0=low, 1=high

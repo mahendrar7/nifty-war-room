@@ -470,13 +470,13 @@ def _score_trend(trend, spot_history=None, spot=None,
     # (no score-level exhaustion guard — direction resolver handles extremes)
 
     # ── Live momentum check (roc1) ──────────────────────────
-    # If spot moved < 10pts in trend direction in the last candle,
+    # If spot moved < 3pts in trend direction in the last candle,
     # the move is stalling — suppress the score.
     if spot_history and len(spot_history) >= 2 and trend_dir:
         roc1 = spot_history[-1] - spot_history[-2]
         if trend_dir == "DOWN":
             roc1 = -roc1  # make positive when moving in trend direction
-        if roc1 < 10:
+        if roc1 < 3:
             return 0.0  # stale trend — don't score
 
     score = 0.0
