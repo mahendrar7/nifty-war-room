@@ -139,6 +139,13 @@ class MarketState:
         self.throttle_cache      = {}   # {"signal_name": {"tick": N, "result": ...}}
         self.tick_counter        = 0    # incremented every main loop iteration
 
+        # Session character — set from open straddle by 9:30
+        # "TREND" = high IV open (straddle/spot >= 1.8%), expect big moves
+        # "RANGE" = low IV open, but can be upgraded by session_range later
+        # None = not yet determined (pre-9:30)
+        self.session_character   = None
+        self.open_iv_proxy       = None  # straddle/spot % at open
+
         # NEW: ML consecutive wrong counter
         self.ml_consecutive_wrong = 0
 
@@ -170,6 +177,8 @@ class MarketState:
         self.hw_history.clear()
         self.throttle_cache.clear()
         self.tick_counter        = 0
+        self.session_character   = None
+        self.open_iv_proxy       = None
         # ml_consecutive_wrong intentionally not reset — ML reliability persists across sessions
 
 

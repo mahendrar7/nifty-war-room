@@ -213,7 +213,7 @@ def best_option_to_buy(df, spot):
 
 
 def compute_market_bias(spot, gravity, call_wall, put_wall, oi_signal, pcr_signal,
-                        trend=None):
+                        trend=None, session_range=None, spot_position=None):
     score = 0
     score += 1 if spot > gravity else -1
     score += 1 if abs(spot - put_wall) < abs(call_wall - spot) else -1
@@ -226,11 +226,32 @@ def compute_market_bias(spot, gravity, call_wall, put_wall, oi_signal, pcr_signa
 
     # Price-action trend boost — when spot is trending hard, OI may lag
     # but bias should reflect reality.  Scaled by move size.
+    # Session range 100+ = trending session (Nifty does 180-400pts daily;
+    # 100pts is reached by ~09:45 on most days, well before the main move).
+    trending_session = session_range is not None and session_range >= 100
     if trend and trend["trending"]:
         move = trend["move_pts"]
-        if move >= 30:
-            boost = 2 if move >= 60 else 1
-            score += boost if trend["direction"] == "UP" else -boost
+        if trending_session and move >= 60:
+            # Trending session + active trend = strong directional bias
+            # Don't wait for OI to confirm what price is screaming
+            boost = 4
+        elif move >= 100:
+            boost = 3
+        elif move >= 60:
+            boost = 2
+        elif move >= 30:
+            boost = 1
+        else:
+            boost = 0
+        score += boost if trend["direction"] == "UP" else -boost
+    elif trending_session and spot_position is not None:
+        # No active trend but session is clearly trending —
+        # spot position within session range tells the story
+        # (spot_position: 0.0 = at session low, 1.0 = at session high)
+        if spot_position < 0.25:
+            score -= 2   # near session low on a big range day = bearish
+        elif spot_position > 0.75:
+            score += 2   # near session high on a big range day = bullish
 
     if   score >= 3:  bias = "BULLISH"
     elif score <= -3: bias = "BEARISH"

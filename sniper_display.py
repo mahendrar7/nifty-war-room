@@ -682,29 +682,46 @@ def _resolve_direction(bias, move_prob, flip_breakout, vacuum,
     Returns (direction_str, direction_color).
     Structural events override bias.
     Trend is demoted when it's a pullback within a larger move.
-    Trend is suppressed at session extremes (exhaustion guard).
+    Exhaustion guard suppresses direction at session extremes — but only
+    for weak sources (bias, move_prob). Structural events and strong trends
+    (100+ pts) are exempt: on a real trend day every new low is 0% by
+    definition, and suppressing direction there costs us the entire move.
     """
     direction = None
+    structural = False   # True = direction from a high-conviction source
 
     # Structural events carry their own direction (highest priority)
-    if not direction and flip_breakout and flip_breakout.get("detected"):
+    if flip_breakout and flip_breakout.get("detected"):
         direction = flip_breakout["direction"]
-    elif not direction and liq_accel and liq_accel.get("detected") and liq_accel.get("conviction") == "HIGH":
+        structural = True
+    if not direction and liq_accel and liq_accel.get("detected") and liq_accel.get("conviction") in ("HIGH", "MODERATE"):
         direction = liq_accel["direction"]
-    elif not direction and vacuum and vacuum.get("status") == "CONFIRMED":
+        if liq_accel.get("conviction") == "HIGH":
+            structural = True
+    if not direction and vacuum and vacuum.get("status") == "CONFIRMED":
         direction = vacuum.get("direction")
-    elif not direction and wall_break_vac and wall_break_vac.get("detected"):
+        structural = True
+    if not direction and wall_break_vac and wall_break_vac.get("detected"):
         direction = wall_break_vac.get("direction")
+        structural = True
 
     # Trend — only if NOT a pullback
     if not direction and trend and trend.get("trending"):
         if trend.get("pullback"):
-            # Pullback: use the BROADER direction instead of the short-window one
             broader = trend.get("broader_direction")
             if broader:
                 direction = broader
         else:
             direction = trend["direction"]
+        # Strong trend (100+ pts) = structural-grade conviction
+        if trend.get("move_pts", 0) >= 100:
+            structural = True
+
+    # Structural upgrade: MODERATE liq_accel + confirming trend = structural
+    if (not structural and liq_accel and liq_accel.get("detected")
+            and trend and trend.get("trending")
+            and trend.get("move_pts", 0) >= 75):
+        structural = True
 
     # Fall back to move_prob direction
     if not direction and move_prob:
@@ -721,9 +738,11 @@ def _resolve_direction(bias, move_prob, flip_breakout, vacuum,
         elif bias == "BEARISH":
             direction = "DOWN"
 
-    # Final exhaustion override — applies to ALL direction sources
-    # Suppress direction when pushing into a session extreme
-    if (direction and spot is not None
+    # Exhaustion guard — suppress direction at session extremes
+    # Skip for structural sources: on a trend day, new extremes are the trade,
+    # not exhaustion. Only gate weak sources (bias, move_prob, weak trend).
+    if (direction and not structural
+            and spot is not None
             and session_high is not None and session_low is not None):
         session_range = session_high - session_low
         if session_range >= 50:
@@ -786,6 +805,13 @@ def _decide_action(total_score, setup, confidence, trap, bias, days_to_expiry,
         return "TRAP RISK — SKIP", Fore.RED, "🪤"
 
     # ── Thresholds ────────────────────────────────────────────────────
+    # Direction must be resolved to issue a trade signal — can't size without it
+    if direction == "NEUTRAL":
+        if total_score >= SNIPER_TAKE_TRADE:
+            return "STALK — NO DIRECTION", Fore.YELLOW, "👁 "
+        if total_score >= SNIPER_STALK:
+            return "STALK — WAIT FOR TRIGGER", Fore.YELLOW, "👁 "
+        return "WAIT", Fore.YELLOW, "⏸ "
     if total_score >= SNIPER_SEND_IT:
         return "SEND IT", Fore.GREEN, "🎯"
     if total_score >= SNIPER_TAKE_TRADE:

@@ -350,13 +350,50 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     days_to_expiry = (expiry - datetime.now().date()).days
     momentum_5m = momentum_data["momentum_5m"] if momentum_data else None
 
+    # ── Session character — detect once from open IV ────────────────────
+    # Straddle/spot at open tells us if the market is pricing a big day.
+    # Set in the first 15 minutes, then session_range can upgrade later.
+    if state.session_character is None and straddle > 0 and spot > 0:
+        iv_proxy = straddle / spot * 100
+        state.open_iv_proxy = round(iv_proxy, 2)
+        if iv_proxy >= 1.8:
+            state.session_character = "TREND"
+        else:
+            state.session_character = "RANGE"
+        print(f"📊 Session character: {state.session_character}  "
+              f"(IV proxy: {iv_proxy:.2f}%, straddle: {straddle:.0f})")
+
     # Trend detection — computed BEFORE bias so price action can influence bias
     expected_move = straddle / 2
     trend = detect_persistent_trend(spot, expected_move)
 
+    session_range = (
+        (state.session_high - state.session_low)
+        if state.session_high is not None and state.session_low is not None
+        else 0
+    )
+    spot_position = (
+        (spot - state.session_low) / session_range
+        if session_range > 0 else None
+    )
+
+    # Session character upgrade: low IV open but session_range says otherwise
+    if state.session_character == "RANGE" and session_range >= 100:
+        state.session_character = "TREND"
+        print(f"📊 Session upgraded → TREND (range hit {session_range:.0f}pts)")
+
+    # Use session character for bias: TREND character lowers the threshold
+    # for trending_session detection
+    effective_session_range = session_range
+    if state.session_character == "TREND" and session_range < 100:
+        # IV says trend day — give the trending_session boost even before
+        # session_range confirms. This lets bias react faster.
+        effective_session_range = 100
+
     bias, confidence = compute_market_bias(
         spot, gravity, call_wall, put_wall, oi_signal, pcr_signal,
-        trend=trend,
+        trend=trend, session_range=effective_session_range,
+        spot_position=spot_position,
     )
 
     # Trap — throttled to 5 minutes
