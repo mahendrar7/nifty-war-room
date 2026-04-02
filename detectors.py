@@ -790,7 +790,8 @@ def compute_next_wall_distance(df, spot, trade_direction):
 def hold_the_line(gamma, momentum_data, next_wall_distance,
                   trade_direction, oi_signal, prev_gamma=None,
                   hw_momentum=None, hw_roc_trend=None, hw_stall=None,
-                  instrument=None, days_to_expiry=None, profile=None):
+                  instrument=None, days_to_expiry=None, profile=None,
+                  price_state=None):
     result = {
         "verdict": "HOLD", "hold_score": 100,
         "exit_reasons": [], "trail_reasons": [], "hold_reasons": [],
@@ -937,9 +938,66 @@ def hold_the_line(gamma, momentum_data, next_wall_distance,
     if next_wall_distance > wall_trail_pts:
         hold_flags.append(f"Next wall {next_wall_distance:.0f}pts away — clear runway")
 
+    # ── PRICE TRACKER FUSION ────────────────────────────────────────
+    price_override_exit = False
+    if price_state is not None:
+        ps = price_state
+        # Hard stop or breakeven stop → immediate EXIT, overrides everything
+        if ps["verdict"] == "EXIT":
+            price_override_exit = True
+            exit_flags.append(
+                f"Price stop triggered — "
+                f"₹{ps['entry']:.0f}→₹{ps['ltp']:.0f} (phase: {ps['phase']})"
+            )
+        elif ps["phase"] == "TRAILING":
+            # Trailing drawdown feeds into score as deductions
+            dd = ps["drawdown_pct"]
+            if dd >= 0.30:
+                exit_flags.append(
+                    f"Option gave back {dd:.0%} of gain "
+                    f"(peak ₹{ps['peak']:.0f}→₹{ps['ltp']:.0f})"
+                )
+                deductions += 35
+            elif dd >= 0.20:
+                trail_flags.append(
+                    f"Option pulling back {dd:.0%} of gain "
+                    f"(peak ₹{ps['peak']:.0f}→₹{ps['ltp']:.0f})"
+                )
+                deductions += 20
+            elif dd >= 0.10:
+                trail_flags.append(
+                    f"Option dipping {dd:.0%} from peak ₹{ps['peak']:.0f}"
+                )
+                deductions += 10
+
+            if ps["peak_stale"]:
+                trail_flags.append(
+                    f"No new peak in 5min — stalling at ₹{ps['peak']:.0f}"
+                )
+                deductions += 15
+
+        elif ps["phase"] == "BREAKEVEN":
+            # In breakeven zone — option is in profit but not yet trailing
+            if ps["gain_pct"] >= 0.15:
+                hold_flags.append(
+                    f"Option +{ps['gain_pct']:.0%} from entry — momentum intact"
+                )
+        elif ps["phase"] == "HARD_STOP":
+            # Underwater — add pressure if losing
+            if ps["gain_pct"] < -0.05:
+                trail_flags.append(
+                    f"Option down {ps['gain_pct']:.0%} — approaching hard stop"
+                )
+                deductions += 15
+
+        result["price_state"] = ps
+    # ────────────────────────────────────────────────────────────────
+
     hold_score = max(0, 100 - deductions)
 
-    if exit_flags:
+    if price_override_exit:
+        verdict, stop_suggestion = "EXIT", "CLOSE"
+    elif exit_flags:
         verdict, stop_suggestion = "EXIT", "CLOSE"
     elif trail_flags and hold_score < 60:
         verdict = "TRAIL"

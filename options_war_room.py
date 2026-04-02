@@ -241,8 +241,12 @@ from heavyweight_momentum import (
     compute_heavyweight_roc, compute_roc_trend, detect_hw_stall,
     save_hw_history, restore_hw_history, clear_hw_history,
 )
+from price_tracker import PriceTracker, resolve_option_symbol
 
 init(autoreset=True)
+
+# Global price tracker — started/stopped on trade entry/exit
+_price_tracker = None
 
 # Global — toggled by Ctrl+D hotkey
 DEBUG_MODE = False
@@ -250,6 +254,49 @@ DEBUG_MODE = False
 # When False, only sniper TAKE TRADE / SEND IT alerts and trade mgmt messages fire.
 # When True, individual signal alerts (vacuum, flip, trap, squeeze, etc.) also fire.
 TELEGRAM_VERBOSE = False
+
+# =============================================================================
+# PRICE TRACKER HELPERS
+# =============================================================================
+
+def _start_price_tracker(strike, option_type, entry_price):
+    """Start the background LTP tracker for the active trade."""
+    global _price_tracker
+    _stop_price_tracker()
+    try:
+        from market_data import kite as _kite_ref
+        instruments = load_instruments(
+            exchange=PROFILE["exchange"],
+            cache_file=PROFILE["cache_file"],
+        )
+        expiry = get_nearest_expiry(instruments, name=PROFILE["name"])
+        symbol = resolve_option_symbol(
+            instruments, strike, option_type, expiry,
+            name=PROFILE["name"], exchange=PROFILE["exchange"],
+        )
+        if symbol is None:
+            print(f"  {Fore.YELLOW}⚠ Price tracker: could not resolve symbol for "
+                  f"{strike} {option_type}{Style.RESET_ALL}")
+            return
+        _price_tracker = PriceTracker(
+            kite=_kite_ref, symbol=symbol,
+            entry_price=entry_price, notify_fn=notify,
+        )
+        _price_tracker.start()
+        print(f"  {Fore.CYAN}📊 Price tracker started — {symbol} "
+              f"@ ₹{entry_price:.0f}{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"  {Fore.YELLOW}⚠ Price tracker failed to start: {e}{Style.RESET_ALL}")
+        _price_tracker = None
+
+
+def _stop_price_tracker():
+    """Stop the background LTP tracker if running."""
+    global _price_tracker
+    if _price_tracker is not None:
+        _price_tracker.stop()
+        _price_tracker = None
+
 
 # =============================================================================
 # FORMATTING HELPERS
@@ -824,6 +871,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         htl_source = "active"
         at = state.active_trade
         wall_distance = compute_next_wall_distance(df, spot, at["option_type"])
+        price_state = _price_tracker.snapshot() if _price_tracker else None
         htl = hold_the_line(
             gamma=gamma, momentum_data=momentum_data,
             next_wall_distance=wall_distance,
@@ -834,6 +882,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
             instrument=instrument,
             days_to_expiry=days_to_expiry,
             profile=PROFILE,
+            price_state=price_state,
         )
         verdict = htl["verdict"]
         htl_color = (Fore.GREEN if verdict == "HOLD"
@@ -843,9 +892,19 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         top_reason = (htl["exit_reasons"] or htl["trail_reasons"] or htl["hold_reasons"])
         reason_str = f"  {top_reason[0][:60]}" if top_reason else ""
         hw_tag = f"  HW:{htl['hw_summary']}" if htl.get("hw_summary") else ""
+        # Price tracker phase display
+        pt_tag = ""
+        if price_state:
+            ps = price_state
+            pt_tag = (f"  LTP:₹{ps['ltp']:.0f} "
+                      f"({ps['gain_pct']:+.0%}) "
+                      f"pk:₹{ps['peak']:.0f} "
+                      f"[{ps['phase']}]")
         print(htl_color +
               f"{htl_emoji} HTL: {verdict}  Score:{htl['hold_score']}  "
               f"Stop:{htl['stop_suggestion']}{reason_str}" + Style.RESET_ALL)
+        if pt_tag:
+            print(Fore.CYAN + f"   {pt_tag}" + Style.RESET_ALL)
         if hw_tag:
             print(Fore.CYAN + f"   {hw_tag}" + Style.RESET_ALL)
         print(f"   Active: {at['strike']} {at['option_type']} "
@@ -857,6 +916,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
                 f"Spot:{spot:.0f} | Score:{htl['hold_score']} | "
                 + " | ".join(htl["exit_reasons"][:2])
             )
+            _stop_price_tracker()
             state.active_trade = None
 
     # SNIPER — decides WHETHER to trade and DIRECTION
@@ -908,6 +968,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
             "lots": t["lots"],
             "trade_type": t.get("trade_type", "directional"),
         }
+        _start_price_tracker(t["strike"], t["option_type"], t["price"])
         print(Fore.GREEN +
               f"  ✅ AUTO-ENTERED → HTL active  │  /exit {_instrument_arg} to close"
               + Style.RESET_ALL)
@@ -1195,6 +1256,16 @@ def _write_snapshot(**kw):
     if htl:
         snap["htl"] = {"verdict": htl["verdict"], "score": htl["hold_score"],
                         "source": kw["htl_source"]}
+        if htl.get("price_state"):
+            ps = htl["price_state"]
+            snap["htl"]["price"] = {
+                "ltp": round(ps["ltp"], 1),
+                "peak": round(ps["peak"], 1),
+                "phase": ps["phase"],
+                "gain_pct": round(ps["gain_pct"], 3),
+                "drawdown_pct": round(ps["drawdown_pct"], 3),
+                "peak_stale": ps["peak_stale"],
+            }
 
     # ML
     if state.last_ml_result and state.last_ml_result["signal"] != 0:
@@ -1451,6 +1522,7 @@ def _process_telegram_command():
                 "lots": cmd["lots"],
                 "trade_type": "manual",
             }
+            _start_price_tracker(cmd["strike"], cmd["option_type"], cmd["price"])
             msg = (f"✅ TELEGRAM ENTRY: {cmd['strike']} {cmd['option_type']} "
                    f"₹{cmd['price']:.0f} ×{cmd['lots']} | {now_str}")
             print(f"\n{'─' * 50}\n  {Fore.GREEN}{msg}{Style.RESET_ALL}\n{'─' * 50}")
@@ -1468,6 +1540,7 @@ def _process_telegram_command():
                 "lots": s["lots"],
                 "trade_type": s.get("trade_type", "directional"),
             }
+            _start_price_tracker(s["strike"], s["option_type"], s["price"])
             msg = (f"✅ TELEGRAM ENTRY: {s['strike']} {s['option_type']} "
                    f"₹{s['price']:.0f} ×{s['lots']} | {now_str}")
             print(f"\n{'─' * 50}\n  {Fore.GREEN}{msg}{Style.RESET_ALL}\n{'─' * 50}")
@@ -1496,6 +1569,7 @@ def _process_telegram_command():
             f"🔴 EXIT (Telegram): {at['strike']} {at['option_type']} | "
             f"Spot:{spot_now:.0f} | Entry ₹{at['entry_price']:.0f} @ {at['entry_time']} | Exited {now_str}"
         )
+        _stop_price_tracker()
         state.active_trade = None
 
 
@@ -1523,6 +1597,7 @@ def run_logger():
             archived_today = True
             global _SIGNALS_CSV
             _SIGNALS_CSV = None   # reset so next day gets a fresh file
+            _stop_price_tracker()
             state.reset_session()
             clear_hw_history()
             if ml is not None:
@@ -1733,6 +1808,7 @@ def _register_trade_entry():
             "lots": s["lots"],
             "trade_type": s.get("trade_type", "directional"),
         }
+        _start_price_tracker(s["strike"], s["option_type"], s["price"])
         msg = (f"✅ ENTERED: {s['strike']} {s['option_type']} "
                f"₹{s['price']:.0f} ×{s['lots']} | {now}")
         print(f"\n{'─' * 50}\n  {Fore.GREEN}{msg}{Style.RESET_ALL}\n{'─' * 50}")
@@ -1760,6 +1836,7 @@ def _register_trade_entry():
                 "entry_price": entry_price, "entry_time": now,
                 "lots": lots, "trade_type": "manual",
             }
+            _start_price_tracker(strike, opt_type, entry_price)
             msg = f"✅ MANUAL: {strike} {opt_type} ₹{entry_price:.0f} ×{lots} | {now}"
             print(f"  {Fore.GREEN}{msg}{Style.RESET_ALL}\n{'─' * 50}")
             notify(
@@ -1800,6 +1877,7 @@ def _register_trade_exit():
         f"🔴 EXIT (manual): {at['strike']} {at['option_type']} | "
         f"Spot:{spot_now:.0f} | Entry ₹{at['entry_price']:.0f} @ {at['entry_time']} | Exited {now}"
     )
+    _stop_price_tracker()
     state.active_trade = None
 
 

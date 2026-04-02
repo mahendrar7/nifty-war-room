@@ -123,6 +123,16 @@ EXPIRY_LOT_CAP  = {0: 2,    1: 3,    2: 4}
 EXPIRY_RISK_SCALAR = {0: 0.50, 1: 0.70, 2: 0.85}
 
 # -----------------------------
+# PRICE TRACKER (option LTP monitoring thread)
+# -----------------------------
+PT_POLL_INTERVAL     = 10     # seconds between LTP polls
+PT_HARD_STOP_PCT     = 0.10   # 10% drop from entry → EXIT (phase 1)
+PT_BREAKEVEN_TRIGGER = 0.10   # 10% gain from entry → move stop to breakeven (phase 2)
+PT_TRAIL_DRAWDOWN    = 0.40   # 40% of peak gain retraced → EXIT (phase 3)
+PT_STALE_PEAK_SEC    = 300    # 5 min with no new peak → tighten trail
+PT_STALE_DRAWDOWN    = 0.25   # tightened trail: 25% of gain when peak is stale
+
+# -----------------------------
 # DETECTOR THRESHOLDS
 # -----------------------------
 GAMMA_FLIP_DANGER_ZONE  = 20     # pts — fallback (use PROFILE["gamma_flip_danger_zone"])
