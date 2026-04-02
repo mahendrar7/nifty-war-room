@@ -403,6 +403,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
             put_wall=put_wall, gamma=gamma, gamma_wall=gamma_wall,
             oi_signal=oi_signal, straddle=straddle,
             straddle_momentum=momentum_5m, days_to_expiry=days_to_expiry, atm=atm,
+            profile=PROFILE,
         )
         cache_result("trap", trap)
     else:
@@ -412,14 +413,14 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     trap_prob = trap["confidence"]
 
     count, direction, strike = breakout_countdown(
-        spot, call_wall, put_wall, momentum_strikes, gamma
+        spot, call_wall, put_wall, momentum_strikes, gamma, profile=PROFILE
     )
 
     mode = compute_trade_mode(bias, trap_prob, count, momentum_strikes, gamma)
     gamma_shift = classify_gamma_shift(compute_gamma_shift(gamma, state.previous_gamma))
 
     if should_compute("magnet"):
-        magnet_strike, magnet_prob = compute_dealer_magnet(df, spot)
+        magnet_strike, magnet_prob = compute_dealer_magnet(df, spot, profile=PROFILE)
         cache_result("magnet", (magnet_strike, magnet_prob))
     else:
         magnet_strike, magnet_prob = get_cached("magnet", (atm, 50))
@@ -428,7 +429,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     squeeze = detect_gamma_squeeze(gamma, momentum_data, oi_signal)
 
     if should_compute("strike_war"):
-        war_strike, war_status = detect_strike_war(df, spot)
+        war_strike, war_status = detect_strike_war(df, spot, profile=PROFILE)
         war_break = detect_strike_war_break(df, prev, war_strike, spot)
         cache_result("strike_war", (war_strike, war_status, war_break))
     else:
@@ -448,6 +449,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         vacuum = detect_liquidity_vacuum(
             df=df, prev_df=prev, spot=spot,
             gamma=gamma, straddle_momentum=momentum_5m,
+            profile=PROFILE,
         )
         cache_result("vacuum", vacuum)
     else:
@@ -464,10 +466,12 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     liq_accel = detect_liquidity_acceleration(
         spot=spot, prev_spot=prev_spot, momentum_data=momentum_data,
         call_oi_speed=call_oi_speed, put_oi_speed=put_oi_speed,
+        profile=PROFILE,
     )
     flip_breakout = detect_gamma_flip_breakout(
         spot=spot, prev_spot=prev_spot,
         flip_level=flip_level, straddle_momentum=momentum_5m,
+        profile=PROFILE,
     )
 
     if should_compute("move_prob"):
@@ -827,6 +831,9 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
             oi_signal=oi_signal, prev_gamma=state.previous_gamma,
             hw_momentum=hw_momentum, hw_roc_trend=hw_roc_trend,
             hw_stall=hw_stall,
+            instrument=instrument,
+            days_to_expiry=days_to_expiry,
+            profile=PROFILE,
         )
         verdict = htl["verdict"]
         htl_color = (Fore.GREEN if verdict == "HOLD"

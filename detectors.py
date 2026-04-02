@@ -13,7 +13,8 @@ from config import (
     WALL_BREAK_OI_DROP, FLIP_BREAKOUT_PROXIMITY, FLIP_BREAKOUT_IV_MIN,
     ACCEL_PRICE_SPEED_MIN, ACCEL_PRICE_SPEED_HIGH, ACCEL_IV_MIN,
     ACCEL_IV_HIGH, ACCEL_SCORE_THRESHOLD,
-    HTL_IV_HOLD_MIN, HTL_IV_EXIT_MIN, HTL_WALL_TRAIL_PTS,
+    HTL_IV_HOLD_MIN, HTL_IV_EXIT_MIN, HTL_IV_TRAIL_MIN, HTL_IV_THRESHOLDS,
+    HTL_WALL_TRAIL_PTS,
     HTL_WALL_EXIT_PTS, HTL_GAMMA_TRAIL,
     HW_EXHAUSTION_DEDUCT, HW_AGAINST_DEDUCT, HW_STALL_DEDUCT,
     MPM_WEIGHTS, MPM_GAMMA_AMP, MPM_GAMMA_DAMP, MPM_CONFLICT_PEN,
@@ -201,7 +202,7 @@ def get_cached(signal_name, default=None):
 
 def classify_option_trap(spot, prev_spot, call_wall, put_wall, gamma,
                          gamma_wall, oi_signal, straddle, straddle_momentum,
-                         days_to_expiry, atm):
+                         days_to_expiry, atm, profile=None):
     """
     Classifies market condition into BULL TRAP / BEAR TRAP / PIN TRAP / NONE.
     Gamma acts as a score multiplier — the causal engine behind all traps.
@@ -244,12 +245,20 @@ def classify_option_trap(spot, prev_spot, call_wall, put_wall, gamma,
     elif gamma == 0: gamma_mult = 1.0
     else:            gamma_mult = 0.6
 
+    # Profile-aware point thresholds
+    p = profile or {}
+    wall_far   = p.get("trap_wall_far", 80)
+    wall_near  = p.get("trap_wall_near", 40)
+    atm_far    = p.get("trap_atm_far", 30)
+    atm_near   = p.get("trap_atm_near", 15)
+    gw_prox    = p.get("trap_gamma_wall", 50)
+
     # BULL TRAP
     bull_score, bull_reason = 0, []
-    if spot_rising and dist_call < 80:
+    if spot_rising and dist_call < wall_far:
         bull_score += 25
         bull_reason.append(f"Spot {spot} rising into Call Wall {call_wall}")
-    if dist_call < 40:
+    if dist_call < wall_near:
         bull_score += 15
         bull_reason.append(f"Within {dist_call:.0f}pts of Call Wall — supply zone")
     if call_writing:
@@ -261,17 +270,17 @@ def classify_option_trap(spot, prev_spot, call_wall, put_wall, gamma,
     if iv_compressing:
         bull_score += 15
         bull_reason.append(f"Straddle compressing {adj_momentum:.1f}% (theta-adj) — no energy behind rally")
-    if abs(spot - gamma_wall) < 50:
+    if abs(spot - gamma_wall) < gw_prox:
         bull_score += 10
         bull_reason.append(f"Gamma Wall {gamma_wall} nearby — dealer resistance concentrated here")
     bull_score = min(int(bull_score * gamma_mult), 100)
 
     # BEAR TRAP
     bear_score, bear_reason = 0, []
-    if spot_falling and dist_put < 80:
+    if spot_falling and dist_put < wall_far:
         bear_score += 25
         bear_reason.append(f"Spot {spot} falling into Put Wall {put_wall}")
-    if dist_put < 40:
+    if dist_put < wall_near:
         bear_score += 15
         bear_reason.append(f"Within {dist_put:.0f}pts of Put Wall — support zone")
     if put_writing:
@@ -283,7 +292,7 @@ def classify_option_trap(spot, prev_spot, call_wall, put_wall, gamma,
     if iv_compressing:
         bear_score += 15
         bear_reason.append(f"Straddle compressing {adj_momentum:.1f}% (theta-adj) — no energy behind selloff")
-    if abs(spot - gamma_wall) < 50:
+    if abs(spot - gamma_wall) < gw_prox:
         bear_score += 10
         bear_reason.append(f"Gamma Wall {gamma_wall} nearby — dealer support concentrated here")
     bear_score = min(int(bear_score * gamma_mult), 100)
@@ -293,7 +302,7 @@ def classify_option_trap(spot, prev_spot, call_wall, put_wall, gamma,
     if days_to_expiry <= 1:
         pin_score += 15
         pin_reason.append("Expiry day — pin forces are strongest")
-    if gamma > 0 and abs(spot - atm) < 30:
+    if gamma > 0 and abs(spot - atm) < atm_far:
         pin_score += 35
         pin_reason.append(f"Positive gamma pinning spot near ATM {atm}")
     if iv_compressing:
@@ -302,9 +311,9 @@ def classify_option_trap(spot, prev_spot, call_wall, put_wall, gamma,
     if call_writing and put_writing:
         pin_score += 15
         pin_reason.append("Both sides writing — market makers pinning the strike")
-    if abs(spot - atm) < 15:
+    if abs(spot - atm) < atm_near:
         pin_score += 10
-        pin_reason.append(f"Spot within 15pts of ATM — deep in pin zone")
+        pin_reason.append(f"Spot within {atm_near:.0f}pts of ATM — deep in pin zone")
     pin_score = min(pin_score, 100)
 
     scores     = {"BULL TRAP": bull_score, "BEAR TRAP": bear_score, "PIN TRAP": pin_score}
@@ -390,8 +399,8 @@ def build_trap_telegram(trap, spot):
 # BREAKOUT COUNTDOWN + STRIKE WAR
 # =============================================================================
 
-def breakout_countdown(spot, call_wall, put_wall, momentum_strikes, gamma):
-    threshold = 30
+def breakout_countdown(spot, call_wall, put_wall, momentum_strikes, gamma, profile=None):
+    threshold = (profile or {}).get("breakout_threshold", 30)
     if abs(call_wall - spot) < threshold:
         if state.breakout_direction == "UPSIDE":
             state.breakout_counter += 1
@@ -413,11 +422,12 @@ def breakout_countdown(spot, call_wall, put_wall, momentum_strikes, gamma):
     return state.breakout_counter, state.breakout_direction, state.breakout_strike
 
 
-def detect_strike_war(df, spot):
+def detect_strike_war(df, spot, profile=None):
     df = df.copy()
     df["total_oi"] = df["call_oi"] + df["put_oi"]
     df["distance"] = abs(df["strike"] - spot)
-    near_df = df[df["distance"] < 100]
+    search_range = (profile or {}).get("strike_war_range", 100)
+    near_df = df[df["distance"] < search_range]
     if near_df.empty:
         return None, None
     war_row       = near_df.loc[near_df["total_oi"].idxmax()]
@@ -447,7 +457,7 @@ def detect_strike_war_break(df, prev_df, war_strike, spot):
 # LIQUIDITY VACUUM
 # =============================================================================
 
-def detect_liquidity_vacuum(df, prev_df, spot, gamma, straddle_momentum):
+def detect_liquidity_vacuum(df, prev_df, spot, gamma, straddle_momentum, profile=None):
     result = {
         "detected": False, "status": "NONE", "score": 0,
         "desert_start": None, "desert_end": None, "desert_width": 0,
@@ -502,16 +512,21 @@ def detect_liquidity_vacuum(df, prev_df, spot, gamma, straddle_momentum):
         direction, desert_start, desert_end, desert_width, target_wall = \
             "DOWNSIDE", dn_end, dn_start, dn_width, dn_target
 
-    if desert_width < VACUUM_MIN_WIDTH:
+    p = profile or {}
+    vac_min  = p.get("vacuum_min_width", VACUUM_MIN_WIDTH)
+    vac_mod  = p.get("vacuum_moderate", 100)
+    vac_wide = p.get("vacuum_wide", 150)
+
+    if desert_width < vac_min:
         return result
 
     score, reason = 30, []
     reason.append(f"OI desert: {desert_start}–{desert_end} ({desert_width}pts of near-zero OI)")
 
-    if desert_width >= 150:
+    if desert_width >= vac_wide:
         score += 20
         reason.append(f"Wide vacuum ({desert_width}pts) — extended free-run zone")
-    elif desert_width >= 100:
+    elif desert_width >= vac_mod:
         score += 10
         reason.append(f"Moderate vacuum ({desert_width}pts)")
 
@@ -652,14 +667,16 @@ def build_wall_break_telegram(wb, spot):
 # GAMMA FLIP BREAKOUT
 # =============================================================================
 
-def detect_gamma_flip_breakout(spot, prev_spot, flip_level, straddle_momentum):
+def detect_gamma_flip_breakout(spot, prev_spot, flip_level, straddle_momentum,
+                               profile=None):
     result = {"detected": False, "direction": None,
               "flip_level": flip_level, "reason": []}
 
     if flip_level is None or prev_spot is None or straddle_momentum is None:
         return result
 
-    if abs(spot - flip_level) > FLIP_BREAKOUT_PROXIMITY:
+    flip_prox = (profile or {}).get("flip_proximity", FLIP_BREAKOUT_PROXIMITY)
+    if abs(spot - flip_level) > flip_prox:
         return result
     if straddle_momentum < FLIP_BREAKOUT_IV_MIN:
         return result
@@ -687,7 +704,7 @@ def detect_gamma_flip_breakout(spot, prev_spot, flip_level, straddle_momentum):
 # =============================================================================
 
 def detect_liquidity_acceleration(spot, prev_spot, momentum_data,
-                                   call_oi_speed, put_oi_speed):
+                                   call_oi_speed, put_oi_speed, profile=None):
     result = {
         "detected": False, "score": 0, "direction": None,
         "conviction": None, "reason": [],
@@ -696,13 +713,17 @@ def detect_liquidity_acceleration(spot, prev_spot, momentum_data,
     if prev_spot is None or momentum_data is None:
         return result
 
+    p = profile or {}
+    speed_min  = p.get("accel_speed_min", ACCEL_PRICE_SPEED_MIN)
+    speed_high = p.get("accel_speed_high", ACCEL_PRICE_SPEED_HIGH)
+
     score, reason = 0, []
     price_speed   = spot - prev_spot
 
-    if abs(price_speed) >= ACCEL_PRICE_SPEED_HIGH:
+    if abs(price_speed) >= speed_high:
         score += 35
         reason.append(f"Price accelerating {price_speed:+.1f}pts — strong velocity")
-    elif abs(price_speed) >= ACCEL_PRICE_SPEED_MIN:
+    elif abs(price_speed) >= speed_min:
         score += 20
         reason.append(f"Price moving {price_speed:+.1f}pts — building momentum")
     else:
@@ -768,16 +789,30 @@ def compute_next_wall_distance(df, spot, trade_direction):
 
 def hold_the_line(gamma, momentum_data, next_wall_distance,
                   trade_direction, oi_signal, prev_gamma=None,
-                  hw_momentum=None, hw_roc_trend=None, hw_stall=None):
+                  hw_momentum=None, hw_roc_trend=None, hw_stall=None,
+                  instrument=None, days_to_expiry=None, profile=None):
     result = {
         "verdict": "HOLD", "hold_score": 100,
         "exit_reasons": [], "trail_reasons": [], "hold_reasons": [],
         "stop_suggestion": "ORIGINAL",
         "hw_summary": None,
     }
+    p = profile or {}
 
     if momentum_data is None:
         return result
+
+    # Instrument-specific IV thresholds, with expiry-day overrides
+    iv_cfg = HTL_IV_THRESHOLDS.get(instrument, {})
+    is_expiry = days_to_expiry is not None and days_to_expiry <= 1
+    if is_expiry:
+        iv_exit_min = iv_cfg.get("expiry_exit_min", iv_cfg.get("exit_min", HTL_IV_EXIT_MIN))
+        iv_trail_min = iv_cfg.get("expiry_trail_min", iv_cfg.get("trail_min", HTL_IV_TRAIL_MIN))
+        iv_hold_min = iv_cfg.get("expiry_hold_min", iv_cfg.get("hold_min", HTL_IV_HOLD_MIN))
+    else:
+        iv_exit_min = iv_cfg.get("exit_min", HTL_IV_EXIT_MIN)
+        iv_trail_min = iv_cfg.get("trail_min", HTL_IV_TRAIL_MIN)
+        iv_hold_min = iv_cfg.get("hold_min", HTL_IV_HOLD_MIN)
 
     iv_mom     = momentum_data["momentum_5m"]
     exit_flags = []
@@ -786,9 +821,12 @@ def hold_the_line(gamma, momentum_data, next_wall_distance,
     deductions  = 0
 
     # EXIT conditions
-    if iv_mom < HTL_IV_EXIT_MIN:
+    if iv_mom < iv_exit_min:
         exit_flags.append(f"IV collapsing {iv_mom:.1f}% — move is done")
         deductions += 40
+    elif iv_mom < iv_trail_min:
+        trail_flags.append(f"IV fading {iv_mom:.1f}% — move aging, watch closely")
+        deductions += 15
 
     if gamma > 0:
         just_flipped = prev_gamma is not None and prev_gamma <= 0
@@ -799,11 +837,14 @@ def hold_the_line(gamma, momentum_data, next_wall_distance,
             trail_flags.append("Gamma positive — dealers absorbing moves, reduce conviction")
             deductions += 20
 
-    if next_wall_distance <= HTL_WALL_EXIT_PTS:
-        exit_flags.append(
-            f"Next wall only {next_wall_distance:.0f}pts away — take profit"
+    wall_exit_pts  = p.get("htl_wall_exit", HTL_WALL_EXIT_PTS)
+    wall_trail_pts = p.get("htl_wall_trail", HTL_WALL_TRAIL_PTS)
+
+    if next_wall_distance <= wall_exit_pts:
+        trail_flags.append(
+            f"Near wall ({next_wall_distance:.0f}pts) — trail stop, watch for rejection"
         )
-        deductions += 35
+        deductions += 15
 
     if trade_direction == "CALL":
         if "Call Writing" in oi_signal and "Put Unwinding" in oi_signal:
@@ -874,26 +915,26 @@ def hold_the_line(gamma, momentum_data, next_wall_distance,
     # ────────────────────────────────────────────────────────────────
 
     # TRAIL conditions
-    if HTL_IV_EXIT_MIN <= iv_mom < HTL_IV_HOLD_MIN:
-        trail_flags.append(f"IV slowing to {iv_mom:.1f}% — move aging, tighten stop")
-        deductions += 20
+    if iv_trail_min <= iv_mom < iv_hold_min:
+        trail_flags.append(f"IV slowing to {iv_mom:.1f}% — tighten stop")
+        deductions += 10
 
-    if HTL_WALL_EXIT_PTS < next_wall_distance <= HTL_WALL_TRAIL_PTS:
+    if wall_exit_pts < next_wall_distance <= wall_trail_pts:
         trail_flags.append(
-            f"Next wall {next_wall_distance:.0f}pts away — trail stop to breakeven"
+            f"Wall {next_wall_distance:.0f}pts ahead — consider breakeven stop"
         )
-        deductions += 15
+        deductions += 10
 
     if HTL_GAMMA_TRAIL <= gamma <= 0.0 and gamma != 0:
         trail_flags.append("Gamma near zero — regime transitioning")
         deductions += 10
 
     # HOLD conditions
-    if iv_mom >= HTL_IV_HOLD_MIN:
+    if iv_mom >= iv_hold_min:
         hold_flags.append(f"IV expanding {iv_mom:.1f}% — move still has energy")
     if gamma < 0:
         hold_flags.append("Negative gamma — dealers amplifying, let it run")
-    if next_wall_distance > HTL_WALL_TRAIL_PTS:
+    if next_wall_distance > wall_trail_pts:
         hold_flags.append(f"Next wall {next_wall_distance:.0f}pts away — clear runway")
 
     hold_score = max(0, 100 - deductions)

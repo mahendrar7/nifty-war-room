@@ -142,6 +142,12 @@ def api_state(instrument):
         "sniper": snap.get("sniper") if snap else None,
         "suggestion": snap.get("suggestion") if snap else None,
         "lot_size": profile.get("lot_size", 65),
+        "heavyweights": snap.get("heavyweights") if snap else None,
+        "bias": snap.get("bias") if snap else None,
+        "action": snap.get("action") if snap else None,
+        "call_wall": snap.get("call_wall") if snap else None,
+        "put_wall": snap.get("put_wall") if snap else None,
+        "gravity": snap.get("gravity") if snap else None,
     }
     return jsonify(result)
 
@@ -249,7 +255,51 @@ def api_exit():
 @app.route("/api/history")
 @auth_required
 def api_history():
-    return jsonify(read_trade_log(50))
+    rows = read_trade_log(100)  # read more to pair up
+    # Club entry+exit into single trades for display
+    # rows are most-recent-first — process in that order so each EXIT
+    # gets matched to the ENTER that comes right after it (i.e. the
+    # most recent entry before that exit chronologically)
+    trades = []
+    pending_exits = {}  # instrument -> list of exit rows waiting for a match
+    for r in rows:
+        if r["action"] == "EXIT":
+            inst_key = r.get("instrument", "")
+            pending_exits.setdefault(inst_key, []).append(r)
+        elif r["action"] == "ENTER":
+            inst_key = r.get("instrument", "")
+            exit_row = None
+            if inst_key in pending_exits and pending_exits[inst_key]:
+                exit_row = pending_exits[inst_key].pop(0)
+
+            entry_price = float(r.get("price", 0) or 0)
+            exit_price = float(exit_row.get("price", 0) or 0) if exit_row else 0
+            pnl = None
+            if exit_row and exit_price:
+                lot_size = INSTRUMENT_PROFILES.get(inst_key, {}).get("lot_size", 65)
+                lots_val = int(r.get("lots", 1) or 1)
+                gross = (exit_price - entry_price) * lot_size * lots_val
+                turnover = (entry_price + exit_price) * lot_size * lots_val
+                brokerage = 40  # flat per round trip
+                commission = turnover * 0.037
+                pnl = round(gross - brokerage - commission, 2)
+
+            trade = {
+                "instrument": inst_key,
+                "strike": r.get("strike", ""),
+                "option_type": r.get("option_type", ""),
+                "entry_price": r.get("price", ""),
+                "entry_time": r.get("entry_time") or (r.get("timestamp", "").split(" ")[1][:5] if r.get("timestamp") else ""),
+                "lots": r.get("lots", ""),
+                "exit_price": exit_row.get("price", "") if exit_row else "",
+                "exit_time": exit_row.get("exit_time") or (exit_row.get("timestamp", "").split(" ")[1][:5] if exit_row and exit_row.get("timestamp") else "") if exit_row else "",
+                "pnl_per_lot": pnl,
+                "status": "CLOSED" if exit_row else "OPEN",
+                "notes": r.get("notes", ""),
+            }
+            trades.append(trade)
+
+    return jsonify(trades[:50])
 
 
 # =============================================================================
@@ -273,6 +323,20 @@ HTML = """
   h1 { font-size: 16px; color: #58a6ff; margin-bottom: 12px; }
   h2 { font-size: 13px; color: #8b949e; margin: 16px 0 8px; text-transform: uppercase; letter-spacing: 1px; }
 
+  .info-snapshot {
+    background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+    padding: 8px 12px; margin-bottom: 12px; font-size: 12px;
+  }
+  .info-row { display: flex; align-items: center; padding: 3px 0; }
+  .info-label {
+    width: 36px; flex-shrink: 0; color: #8b949e; font-weight: 700;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .info-val { color: #c9d1d9; font-size: 12px; }
+  .info-val .bullish { color: #3fb950; }
+  .info-val .bearish { color: #f85149; }
+  .info-val .neutral { color: #d29922; }
+
   .tabs { display: flex; gap: 4px; margin-bottom: 12px; }
   .tab {
     flex: 1; padding: 8px; text-align: center; border: 1px solid #30363d;
@@ -289,12 +353,6 @@ HTML = """
   }
   .inst-tab.active { background: #238636; color: #fff; border-color: #238636; }
 
-  .spot-bar {
-    background: #161b22; border: 1px solid #30363d; border-radius: 6px;
-    padding: 8px 12px; margin-bottom: 12px; font-size: 13px;
-    display: flex; justify-content: space-between; align-items: center;
-  }
-  .spot-val { color: #58a6ff; font-weight: 700; font-size: 15px; }
 
   .active-trade {
     background: #1a2332; border: 1px solid #1f6feb; border-radius: 6px;
@@ -386,22 +444,30 @@ HTML = """
 </head>
 <body>
 
-<h1>Trade Logger</h1>
-
-<div class="tabs">
-  <div class="tab active" onclick="switchTab('entry')">Entry</div>
-  <div class="tab" onclick="switchTab('exit')">Exit</div>
-  <div class="tab" onclick="switchTab('history')">History</div>
-</div>
-
 <div class="inst-tabs">
   <div class="inst-tab active" data-inst="NIFTY" onclick="switchInst('NIFTY')">NIFTY</div>
   <div class="inst-tab" data-inst="SENSEX" onclick="switchInst('SENSEX')">SENSEX</div>
 </div>
 
-<div class="spot-bar">
-  <span>SPOT</span>
-  <span class="spot-val" id="spot-display">--</span>
+<div class="info-snapshot" id="info-snapshot">
+  <div class="info-row">
+    <span class="info-label">HW</span>
+    <span class="info-val" id="info-hw">--</span>
+  </div>
+  <div class="info-row">
+    <span class="info-label">MAP</span>
+    <span class="info-val" id="info-map">--</span>
+  </div>
+  <div class="info-row">
+    <span class="info-label">REC</span>
+    <span class="info-val" id="info-rec">--</span>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('entry')">Entry</div>
+  <div class="tab" onclick="switchTab('exit')">Exit</div>
+  <div class="tab" onclick="switchTab('history')">History</div>
 </div>
 
 <div id="active-trade-box" class="active-trade" style="display:none">
@@ -434,7 +500,7 @@ HTML = """
     </div>
     <div class="form-group">
       <label>Lots</label>
-      <input type="number" id="lots" value="2" min="1" max="20">
+      <select id="lots"></select>
     </div>
   </div>
 
@@ -468,7 +534,7 @@ HTML = """
 <div id="section-history" class="section">
   <table class="history-table">
     <thead>
-      <tr><th>Time</th><th>Act</th><th>Strike</th><th>₹</th><th>Lots</th><th>P&L/lot</th></tr>
+      <tr><th>Strike</th><th>Entry</th><th>Exit</th><th>Lots</th><th>Net P&L</th><th>Status</th></tr>
     </thead>
     <tbody id="history-body"></tbody>
   </table>
@@ -516,15 +582,46 @@ async function loadState() {
     const res = await fetch('/api/state/' + currentInst);
     stateData = await res.json();
 
-    document.getElementById('spot-display').textContent =
-      stateData.spot ? stateData.spot.toFixed(1) : '--';
+    // Info snapshot — 3 lines
+    const hw = stateData.heavyweights;
+    if (hw) {
+      const dirCls = hw.direction === 'BULLISH' ? 'bullish' : hw.direction === 'BEARISH' ? 'bearish' : 'neutral';
+      const movers = (hw.top_movers || []).map(m => {
+        const sign = m.roc >= 0 ? '+' : '';
+        return `${m.name} ${sign}${m.roc.toFixed(1)}%`;
+      }).join(', ');
+      document.getElementById('info-hw').innerHTML =
+        `<span class="${dirCls}">${hw.direction}</span> ${hw.strength} | ${movers}`;
+    } else {
+      document.getElementById('info-hw').textContent = '--';
+    }
+
+    // MAP line: call wall, put wall, gravity
+    if (stateData.spot) {
+      const cw = stateData.call_wall || '--';
+      const pw = stateData.put_wall || '--';
+      const grav = stateData.gravity || '--';
+      document.getElementById('info-map').innerHTML =
+        `Spot <strong>${stateData.spot.toFixed(0)}</strong> | CW ${cw} · PW ${pw} · Grav ${grav}`;
+    } else {
+      document.getElementById('info-map').textContent = '--';
+    }
+
+    // REC line: sniper action + bias
+    const sniper = stateData.sniper;
+    if (sniper) {
+      const dirCls = sniper.direction === 'BULLISH' ? 'bullish' : sniper.direction === 'BEARISH' ? 'bearish' : 'neutral';
+      document.getElementById('info-rec').innerHTML =
+        `<span class="${dirCls}">${sniper.action}</span> | ${stateData.bias || '--'} · ${stateData.action || ''}`;
+    } else {
+      document.getElementById('info-rec').textContent = stateData.bias || '--';
+    }
 
     // Populate strikes
     const sel = document.getElementById('strike');
     const oldVal = sel.value;
     sel.innerHTML = '';
     const strikes = stateData.strikes || [];
-    // Find ATM
     const spot = stateData.spot || 0;
     let closest = strikes[0];
     strikes.forEach(s => {
@@ -538,6 +635,18 @@ async function loadState() {
       sel.appendChild(opt);
     });
     if (oldVal && strikes.includes(parseInt(oldVal))) sel.value = oldVal;
+
+    // Populate lots dropdown (once)
+    const lotsSel = document.getElementById('lots');
+    if (lotsSel.options.length === 0) {
+      for (let i = 1; i <= 10; i++) {
+        const opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = i;
+        if (i === 2) opt.selected = true;
+        lotsSel.appendChild(opt);
+      }
+    }
 
     // Active trade
     const atBox = document.getElementById('active-trade-box');
@@ -564,7 +673,6 @@ async function loadState() {
       document.getElementById('htl-score').textContent =
         htl.score != null ? `  score: ${htl.score}` : '';
     } else if (at) {
-      // Trade active but no HTL data yet
       htlBar.style.display = 'flex';
       document.getElementById('htl-dot').className = 'htl-dot hold';
       const verdictEl = document.getElementById('htl-verdict');
@@ -579,7 +687,9 @@ async function loadState() {
     document.getElementById('btn-submit-entry').disabled = !!at;
 
   } catch (e) {
-    document.getElementById('spot-display').textContent = 'offline';
+    document.getElementById('info-hw').textContent = 'offline';
+    document.getElementById('info-map').textContent = '--';
+    document.getElementById('info-rec').textContent = '--';
   }
 }
 
@@ -643,26 +753,24 @@ async function submitExit() {
 async function loadHistory() {
   try {
     const res = await fetch('/api/history');
-    const rows = await res.json();
+    const trades = await res.json();
     const tbody = document.getElementById('history-body');
     tbody.innerHTML = '';
-    rows.forEach(r => {
+    trades.forEach(t => {
       const tr = document.createElement('tr');
-      const actionClass = r.action === 'ENTER' ? 'enter' : 'exit';
-      const time = r.timestamp ? r.timestamp.split(' ')[1].slice(0, 5) : '';
       let pnlHtml = '';
-      if (r.pnl_per_lot && r.pnl_per_lot !== '') {
-        const pnl = parseFloat(r.pnl_per_lot);
-        const cls = pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
-        pnlHtml = `<span class="${cls}">${pnl >= 0 ? '+' : ''}${pnl}</span>`;
+      if (t.pnl_per_lot != null) {
+        const cls = t.pnl_per_lot >= 0 ? 'pnl-pos' : 'pnl-neg';
+        pnlHtml = `<span class="${cls}">${t.pnl_per_lot >= 0 ? '+' : ''}₹${t.pnl_per_lot}</span>`;
       }
+      const statusCls = t.status === 'OPEN' ? 'enter' : '';
       tr.innerHTML = `
-        <td>${time}</td>
-        <td class="${actionClass}">${r.action}</td>
-        <td>${r.strike} ${r.option_type}</td>
-        <td>${r.price}</td>
-        <td>${r.lots}</td>
+        <td>${t.strike} ${t.option_type}</td>
+        <td>${t.entry_price} @ ${t.entry_time}</td>
+        <td>${t.exit_price ? t.exit_price + ' @ ' + t.exit_time : '--'}</td>
+        <td>${t.lots}</td>
         <td>${pnlHtml}</td>
+        <td class="${statusCls}">${t.status}</td>
       `;
       tbody.appendChild(tr);
     });

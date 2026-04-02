@@ -331,7 +331,13 @@ def build_targets(candles_df, x_points=None):
         # intraday — a 480pt straddle does not mean NIFTY moves 240pts per candle.
         median_range = df["candle_range"].median()
         # Cap between 20 and 80 points — practical intraday range for NIFTY
-        x_points = float(np.clip(median_range * 0.8, 20, 80))
+        from config import INSTRUMENT_PROFILES
+        # Use instrument-specific move thresholds if available
+        inst_name = getattr(self, '_instrument', 'nifty').upper()
+        prof = INSTRUMENT_PROFILES.get(inst_name, {})
+        ml_min = prof.get("ml_move_min", 20)
+        ml_max = prof.get("ml_move_max", 80)
+        x_points = float(np.clip(median_range * 0.8, ml_min, ml_max))
         straddle_avg = df["straddle_close"].mean()
         print(f"  Auto threshold X = {x_points:.1f} points "              f"(80% of median candle range {median_range:.1f}pts, "              f"straddle avg={straddle_avg:.1f})")
 
@@ -407,7 +413,11 @@ def add_lag_features(df, lags=3):
 class MLEngine:
 
     def __init__(self, instrument="nifty"):
+        self._instrument = instrument
         prefix = instrument.lower()
+        from config import INSTRUMENT_PROFILES
+        prof = INSTRUMENT_PROFILES.get(instrument.upper(), {})
+        self._default_x = (prof.get("ml_move_min", 20) + prof.get("ml_move_max", 80)) / 2
         self.model_file    = f"data/ml_model_{prefix}.joblib"
         self.model_xgb     = f"data/ml_model_{prefix}.ubj"
         self.dataset_file  = f"data/ml_dataset_{prefix}.csv"
@@ -417,7 +427,7 @@ class MLEngine:
         self.feedback_file = f"data/ml_feedback_{prefix}.csv"
         self.model      = None
         self.features   = None
-        self.x_points   = DEFAULT_X
+        self.x_points   = self._default_x
         self.dataset    = None
 
     # ── Build dataset from CSV(s) ─────────────────────────────────────────────

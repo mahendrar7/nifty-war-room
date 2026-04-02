@@ -33,6 +33,27 @@ INSTRUMENT_PROFILES = {
         "gamma_flip_danger_zone": 20,
         "csv_file":             "data/options_log_1min_nifty.csv",
         "cache_file":           "instrument_cache_nifty.pkl",
+        # Point-based detector thresholds (NIFTY spot ~22-23k)
+        "trap_wall_far":        80,     # pts — spot approaching wall
+        "trap_wall_near":       40,     # pts — deep in wall zone
+        "trap_atm_far":         30,     # pts — near ATM for pin trap
+        "trap_atm_near":        15,     # pts — deep ATM pin zone
+        "trap_gamma_wall":      50,     # pts — gamma wall proximity
+        "breakout_threshold":   30,     # pts — countdown trigger distance
+        "strike_war_range":     100,    # pts — search range for strike war
+        "vacuum_min_width":     50,     # pts — minimum desert width
+        "vacuum_moderate":      100,    # pts — moderate vacuum
+        "vacuum_wide":          150,    # pts — wide vacuum
+        "accel_speed_min":      1.5,    # pts/candle — acceleration min
+        "accel_speed_high":     6.0,    # pts/candle — acceleration high
+        "flip_proximity":       25,     # pts — flip breakout proximity
+        "htl_wall_exit":        25,     # pts — wall distance for exit
+        "htl_wall_trail":       60,     # pts — wall distance for trail
+        "magnet_near":          20,     # pts — magnet probability bands
+        "magnet_mid":           40,
+        "magnet_far":           80,
+        "ml_move_min":          20,     # pts — ML target threshold floor
+        "ml_move_max":          80,     # pts — ML target threshold cap
     },
     "SENSEX": {
         "spot_symbol":          "BSE:SENSEX",
@@ -44,6 +65,27 @@ INSTRUMENT_PROFILES = {
         "gamma_flip_danger_zone": 50,
         "csv_file":             "data/options_log_1min_sensex.csv",
         "cache_file":           "instrument_cache_sensex.pkl",
+        # Point-based detector thresholds (SENSEX spot ~72-77k, ~3x NIFTY)
+        "trap_wall_far":        200,
+        "trap_wall_near":       100,
+        "trap_atm_far":         75,
+        "trap_atm_near":        40,
+        "trap_gamma_wall":      125,
+        "breakout_threshold":   75,
+        "strike_war_range":     250,
+        "vacuum_min_width":     125,
+        "vacuum_moderate":      250,
+        "vacuum_wide":          375,
+        "accel_speed_min":      4.5,
+        "accel_speed_high":     18.0,
+        "flip_proximity":       65,
+        "htl_wall_exit":        60,
+        "htl_wall_trail":       150,
+        "magnet_near":          50,
+        "magnet_mid":           100,
+        "magnet_far":           200,
+        "ml_move_min":          60,
+        "ml_move_max":          240,
     },
 }
 
@@ -83,24 +125,47 @@ EXPIRY_RISK_SCALAR = {0: 0.50, 1: 0.70, 2: 0.85}
 # -----------------------------
 # DETECTOR THRESHOLDS
 # -----------------------------
-GAMMA_FLIP_DANGER_ZONE  = 20     # pts — danger zone around flip level
-FLIP_BREAKOUT_PROXIMITY = 25     # pts — how close to flip before watching for cross
+GAMMA_FLIP_DANGER_ZONE  = 20     # pts — fallback (use PROFILE["gamma_flip_danger_zone"])
+FLIP_BREAKOUT_PROXIMITY = 25     # pts — fallback (use PROFILE["flip_proximity"])
 FLIP_BREAKOUT_IV_MIN    = 0.5    # % straddle momentum needed to confirm breakout
 OI_DESERT_THRESHOLD     = 0.10   # strike OI < 10% of chain max = desert
 WALL_DISSOLVE_RATE      = 0.30   # wall lost >30% OI = dissolving
-VACUUM_MIN_WIDTH        = 50     # desert must span ≥ 50pts
+VACUUM_MIN_WIDTH        = 50     # pts — fallback (use PROFILE["vacuum_min_width"])
 WALL_BREAK_OI_DROP      = 0.25   # 25% OI loss = wall breaking
 
-ACCEL_PRICE_SPEED_MIN   = 1.5    # pts per candle minimum for acceleration
-ACCEL_PRICE_SPEED_HIGH  = 6.0    # pts per candle = high conviction
+ACCEL_PRICE_SPEED_MIN   = 1.5    # pts/candle — fallback (use PROFILE["accel_speed_min"])
+ACCEL_PRICE_SPEED_HIGH  = 6.0    # pts/candle — fallback (use PROFILE["accel_speed_high"])
 ACCEL_IV_MIN            = 0.8    # % straddle momentum minimum
 ACCEL_IV_HIGH           = 2.5    # % straddle momentum = high conviction
 ACCEL_SCORE_THRESHOLD   = 40     # minimum score to report acceleration
 
-HTL_IV_HOLD_MIN    =  1.0   # straddle momentum floor for HOLD
-HTL_IV_EXIT_MIN    = -1.0   # straddle momentum floor — below = EXIT
-HTL_WALL_TRAIL_PTS =  60    # pts to next wall — start trailing
-HTL_WALL_EXIT_PTS  =  25    # pts to next wall — exit
+# HTL IV thresholds — per instrument, with expiry-day overrides
+# On DTE 0-1 theta crush makes IV mom naturally negative; widen thresholds
+HTL_IV_THRESHOLDS = {
+    "NIFTY": {
+        "hold_min":   0.5,   # above = HOLD
+        "trail_min": -1.0,   # soft TRAIL
+        "exit_min":  -3.0,   # hard EXIT (P5 = -3.70)
+        # Expiry day: median is -2.22, P5 is -13.96
+        "expiry_hold_min":  -0.5,
+        "expiry_trail_min": -4.0,
+        "expiry_exit_min":  -9.0,
+    },
+    "SENSEX": {
+        "hold_min":   0.5,   # above = HOLD
+        "trail_min": -2.0,   # soft TRAIL
+        "exit_min":  -5.0,   # hard EXIT (P5 = -4.33)
+        # Expiry day: median is -1.23, P5 is -9.81
+        "expiry_hold_min":  -0.5,
+        "expiry_trail_min": -3.5,
+        "expiry_exit_min":  -7.0,
+    },
+}
+HTL_IV_HOLD_MIN    =  0.5   # default fallback
+HTL_IV_EXIT_MIN    = -3.0   # default fallback
+HTL_IV_TRAIL_MIN   = -1.0   # default fallback
+HTL_WALL_TRAIL_PTS =  60    # pts — fallback (use PROFILE["htl_wall_trail"])
+HTL_WALL_EXIT_PTS  =  25    # pts — fallback (use PROFILE["htl_wall_exit"])
 HTL_GAMMA_TRAIL    =  0.0   # gamma at zero = start trailing
 
 # HEAVYWEIGHT MOMENTUM (for HTL)

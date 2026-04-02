@@ -174,7 +174,7 @@ def compute_premium_gravity(df):
     return round((df["strike"] * df["premium_mass"]).sum() / total_mass)
 
 
-def compute_dealer_magnet(df, spot):
+def compute_dealer_magnet(df, spot, profile=None):
     df = df.copy()
     df["total_oi"]      = df["call_oi"] + df["put_oi"]
     df["total_premium"] = df["call_ltp"] + df["put_ltp"]
@@ -191,10 +191,14 @@ def compute_dealer_magnet(df, spot):
     )
     row      = df.loc[df["magnet_score"].idxmax()]
     distance = abs(spot - row["strike"])
-    if   distance < 20: probability = 80
-    elif distance < 40: probability = 60
-    elif distance < 80: probability = 40
-    else:               probability = 20
+    p = profile or {}
+    mag_near = p.get("magnet_near", 20)
+    mag_mid  = p.get("magnet_mid", 40)
+    mag_far  = p.get("magnet_far", 80)
+    if   distance < mag_near: probability = 80
+    elif distance < mag_mid:  probability = 60
+    elif distance < mag_far:  probability = 40
+    else:                     probability = 20
     return row["strike"], probability
 
 
