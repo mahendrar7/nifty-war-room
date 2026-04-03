@@ -9,6 +9,12 @@ Phases:
   2. BREAKEVEN  — option gains PT_BREAKEVEN_TRIGGER from entry → stop at entry
   3. TRAILING   — 40% of peak gain retraced → EXIT (tightens to 25% if
                   peak is stale for PT_STALE_PEAK_SEC)
+
+TODO / WATCH:
+  - Breakeven stop has no cushion — a momentary LTP dip below entry on a
+    wide bid-ask spread will trigger EXIT. If this causes false exits in
+    practice, add a 2% buffer: exit only when ltp < entry_price * 0.98
+    instead of exact breakeven. Monitor for ~1 week before deciding.
 """
 
 import threading
