@@ -185,11 +185,17 @@ W = {
 # SCORING FUNCTIONS — each returns 0.0 to 1.0 (scaled by weight)
 # ─────────────────────────────────────────────────────────────
 
-def _score_gamma(gamma, flip_level, spot, call_wall, put_wall):
+def _score_gamma(gamma, flip_level, spot, call_wall, put_wall, profile=None):
     """
     Negative gamma + near flip = explosive.
     Positive gamma + far from flip = pinned = bad for scalp.
     """
+    p = profile or {}
+    flip_near = p.get("sniper_flip_near", 15)
+    flip_far = p.get("sniper_flip_far", 40)
+    wall_near = p.get("sniper_wall_near", 25)
+    wall_far = p.get("sniper_wall_far", 50)
+
     score = 0.0
 
     # Gamma sign: negative = dealer short gamma = amplified moves
@@ -201,18 +207,18 @@ def _score_gamma(gamma, flip_level, spot, call_wall, put_wall):
     # Flip proximity: close to flip = regime change zone
     if flip_level:
         dist = abs(spot - flip_level)
-        if dist <= 15:
+        if dist <= flip_near:
             score += 0.3     # right at flip — maximum potential
-        elif dist <= 40:
+        elif dist <= flip_far:
             score += 0.15
 
     # Wall proximity: near a wall = catalyst
     to_upper = abs(call_wall - spot)
     to_lower = abs(spot - put_wall)
     nearest = min(to_upper, to_lower)
-    if nearest <= 25:
+    if nearest <= wall_near:
         score += 0.2
-    elif nearest <= 50:
+    elif nearest <= wall_far:
         score += 0.1
 
     return min(1.0, score)
@@ -254,13 +260,15 @@ def _score_straddle(momentum_data):
     return min(1.0, score)
 
 
-def _score_spot_vs_walls(spot, call_wall, put_wall, gamma):
+def _score_spot_vs_walls(spot, call_wall, put_wall, gamma, profile=None):
     """
     Near a wall with negative gamma = breakout potential.
     Near a wall with positive gamma = wall defense / bounce potential.
     Mid-range with positive gamma = pinned = low score.
     Past a wall = breakout underway = high score.
     """
+    wall_touch = (profile or {}).get("sniper_wall_touch", 10)
+
     total_range = call_wall - put_wall
     if total_range <= 0:
         return 0.0
@@ -301,9 +309,9 @@ def _score_spot_vs_walls(spot, call_wall, put_wall, gamma):
         if gamma < 0:
             score += 0.15
 
-    # Bonus: extreme positioning (within 10pts of wall)
+    # Bonus: extreme positioning (essentially at the wall)
     nearest = min(abs(call_wall - spot), abs(spot - put_wall))
-    if nearest <= 10:
+    if nearest <= wall_touch:
         score += 0.2
 
     return min(1.0, score)
@@ -333,7 +341,7 @@ def _score_oi_velocity(velocity, call_oi_speed, put_oi_speed):
     return min(1.0, score)
 
 
-def _score_iv(momentum_data, straddle, days_to_expiry):
+def _score_iv(momentum_data, straddle, days_to_expiry, profile=None):
     """
     IV expanding = premium supports the move.
     ANTI-DOUBLE-COUNT: if straddle momentum is already strong (>= 2%),
@@ -361,7 +369,8 @@ def _score_iv(momentum_data, straddle, days_to_expiry):
             score += 0.2
 
     # Expiry penalty: 0 DTE with low straddle = death by theta
-    if days_to_expiry == 0 and straddle < 80:
+    straddle_low = (profile or {}).get("sniper_straddle_low", 80)
+    if days_to_expiry == 0 and straddle < straddle_low:
         score *= 0.5
 
     # Hard cap when straddle momentum already strong
@@ -448,7 +457,7 @@ def _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze)
 
 
 def _score_trend(trend, spot_history=None, spot=None,
-                 session_high=None, session_low=None):
+                 session_high=None, session_low=None, profile=None):
     """
     Pure price-action trend score — fallback when OI-derived signals lag.
     Uses detect_persistent_trend() output + live ROC from spot_history.
@@ -469,24 +478,34 @@ def _score_trend(trend, spot_history=None, spot=None,
 
     # (no score-level exhaustion guard — direction resolver handles extremes)
 
+    # Instrument-scaled thresholds
+    roc_th = (profile or {}).get("sniper_trend_roc", [-1, 1, 3])
+    move_th = (profile or {}).get("sniper_trend_move", [30, 50, 80])
+    speed_th = (profile or {}).get("sniper_trend_speed", [1, 2, 5])
+
     # ── Live momentum check (roc1) ──────────────────────────
-    # If spot moved < 3pts in trend direction in the last candle,
-    # the move is stalling — suppress the score.
+    # If the last candle moved against the trend, suppress fully.
+    # If it just stalled, apply a penalty but don't zero out.
+    roc1_penalty = 1.0
     if spot_history and len(spot_history) >= 2 and trend_dir:
         roc1 = spot_history[-1] - spot_history[-2]
         if trend_dir == "DOWN":
             roc1 = -roc1  # make positive when moving in trend direction
-        if roc1 < 3:
-            return 0.0  # stale trend — don't score
+        if roc1 < roc_th[0]:
+            return 0.0   # actively reversing — kill score
+        elif roc1 < roc_th[1]:
+            roc1_penalty = 0.3   # stalled — heavy penalty but not zero
+        elif roc1 < roc_th[2]:
+            roc1_penalty = 0.6   # slow but still moving in trend direction
 
     score = 0.0
 
     # Move magnitude
-    if pts >= 80:
+    if pts >= move_th[2]:
         score += 0.5
-    elif pts >= 50:
+    elif pts >= move_th[1]:
         score += 0.35
-    elif pts >= 30:
+    elif pts >= move_th[0]:
         score += 0.2
 
     # Duration — sustained trend is more reliable
@@ -500,14 +519,14 @@ def _score_trend(trend, spot_history=None, spot=None,
     # Speed (pts per minute) — fast moves = momentum
     if duration > 0:
         speed = pts / duration
-        if speed >= 5:
-            score += 0.3     # 5+ pts/min = very fast
-        elif speed >= 2:
+        if speed >= speed_th[2]:
+            score += 0.3
+        elif speed >= speed_th[1]:
             score += 0.2
-        elif speed >= 1:
+        elif speed >= speed_th[0]:
             score += 0.1
 
-    return min(1.0, score)
+    return min(1.0, score * roc1_penalty)
 
 
 def compute_gamma_momentum(gamma_history):
@@ -854,6 +873,7 @@ def sniper_display(
     debug=False,
     gamma_history=None,
     spot_history=None,
+    profile=None,
 ):
     """
     Call this at the end of print_dashboard().
@@ -874,17 +894,17 @@ def sniper_display(
 
     # ── Score each signal ──────────────────────────────────────
     scores = {
-        "gamma_structure":   _score_gamma(gamma, flip_level, spot, call_wall, put_wall),
+        "gamma_structure":   _score_gamma(gamma, flip_level, spot, call_wall, put_wall, profile=profile),
         "gamma_momentum":    _score_gamma_momentum(gamma_mom),
         "straddle_momentum": _score_straddle(momentum_data),
-        "spot_vs_walls":     _score_spot_vs_walls(spot, call_wall, put_wall, gamma),
+        "spot_vs_walls":     _score_spot_vs_walls(spot, call_wall, put_wall, gamma, profile=profile),
         "oi_velocity":       _score_oi_velocity(velocity, call_oi_speed, put_oi_speed),
-        "iv_premium":        _score_iv(momentum_data, straddle, days_to_expiry),
+        "iv_premium":        _score_iv(momentum_data, straddle, days_to_expiry, profile=profile),
         "move_prob":         _score_move_prob(move_prob),
         "structural_event":  _score_structural(vacuum, wall_break_vac, flip_breakout, liq_accel, squeeze),
         "trend":             _score_trend(trend, spot_history=spot_history,
                                          spot=spot, session_high=_st.session_high,
-                                         session_low=_st.session_low),
+                                         session_low=_st.session_low, profile=profile),
     }
 
     # Weighted total (0-10)

@@ -45,7 +45,7 @@ def compute_trade_mode(bias, trap_prob, breakout_cycles, momentum_strikes, gamma
 
 def interpret_market(spot, atm, bias, confidence, gamma, gamma_flip,
                      trap_prob, breakout_count, momentum_data, oi_signal,
-                     vacuum=None, velocity=None, trend=None):
+                     vacuum=None, velocity=None, trend=None, profile=None):
     regime = "UNCLEAR"
     action = "WAIT"
 
@@ -56,8 +56,9 @@ def interpret_market(spot, atm, bias, confidence, gamma, gamma_flip,
         return "LIQUIDITY VACUUM", action
 
     # Spot momentum override — if price is trending hard, it's NOT pinning
-    # even if gamma is positive.  A 50+ pt move in 15-30 min is a real trend.
-    if trend and trend["trending"] and trend["move_pts"] >= 50:
+    # even if gamma is positive.
+    trend_override = (profile or {}).get("trend_regime_override", 50)
+    if trend and trend["trending"] and trend["move_pts"] >= trend_override:
         d = "BULLISH" if trend["direction"] == "UP" else "BEARISH"
         return "VOLATILITY EXPANSION", f"TREND FOLLOW {d} — {trend['move_pts']:.0f}pts in {trend['duration_minutes']}min"
 

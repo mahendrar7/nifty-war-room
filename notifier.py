@@ -8,7 +8,6 @@ def send_telegram_message(message):
     data = {
         "chat_id": CHAT_ID,
         "text": message,
-        "parse_mode": "Markdown"
     }
     try:
         response = requests.post(url, data=data)

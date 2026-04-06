@@ -537,7 +537,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     raw_regime, raw_action = interpret_market(
         spot, atm, bias, confidence, gamma, gamma_flip,
         trap_prob, count, momentum_data, oi_signal,
-        vacuum=vacuum, velocity=velocity, trend=trend,
+        vacuum=vacuum, velocity=velocity, trend=trend, profile=PROFILE,
     )
 
     # ── Structural bypass — skip confirmation, force immediately ─────────
@@ -596,8 +596,14 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         ml_bias_str = _ml_bias_to_str(state.last_ml_result["signal"])
 
         # FIX: ML kill switch — suppress ML when it's been consistently wrong
+        # Only activate kill switch after enough training data (1000 candles)
         from config import ML_CONSECUTIVE_WRONG_KILL
-        ml_killed = state.ml_consecutive_wrong >= ML_CONSECUTIVE_WRONG_KILL
+        from ml_engine import FEEDBACK_MIN_CANDLES
+        ml_has_enough_data = (ml is not None and hasattr(ml, 'engine')
+                              and ml.engine.dataset is not None
+                              and len(ml.engine.dataset) >= FEEDBACK_MIN_CANDLES)
+        ml_killed = (ml_has_enough_data
+                     and state.ml_consecutive_wrong >= ML_CONSECUTIVE_WRONG_KILL)
 
         if ml_killed or state.last_ml_result["signal"] == 0:
             ml_signal = "neutral"
@@ -879,7 +885,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
             oi_signal=oi_signal, prev_gamma=state.previous_gamma,
             hw_momentum=hw_momentum, hw_roc_trend=hw_roc_trend,
             hw_stall=hw_stall,
-            instrument=instrument,
+            instrument=_instrument_arg,
             days_to_expiry=days_to_expiry,
             profile=PROFILE,
             price_state=price_state,
@@ -934,6 +940,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         gamma_shift=gamma_shift, notify_fn=None, debug=DEBUG_MODE,
         gamma_history=list(state.gamma_history),
         spot_history=list(state.spot_history),
+        profile=PROFILE,
     )
 
     # TRADE SUGGESTION — only when sniper endorses
@@ -1614,7 +1621,7 @@ def run_logger():
                 from backtest_from_oi import run_daily_report
                 run_daily_report(
                     instrument=_instrument_arg.lower(),
-                    min_pts=50,
+                    min_pts=PROFILE.get("backtest_min_pts", 50),
                     num_lots=2,
                     lot_size=PROFILE["lot_size"],
                 )

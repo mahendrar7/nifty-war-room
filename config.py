@@ -54,6 +54,19 @@ INSTRUMENT_PROFILES = {
         "magnet_far":           80,
         "ml_move_min":          20,     # pts — ML target threshold floor
         "ml_move_max":          80,     # pts — ML target threshold cap
+        # Sniper trend scoring thresholds
+        "sniper_trend_move":    [30, 50, 80],    # low/med/high move magnitude
+        "sniper_trend_speed":   [1, 2, 5],       # low/med/high pts/min
+        "sniper_trend_roc":     [-1, 1, 3],      # reverse/stall/slow roc1 boundaries
+        "trend_regime_override": 50,              # pts to override GAMMA PINNING regime
+        "backtest_min_pts":     50,               # min swing size for backtest
+        # Sniper gamma/wall scoring thresholds
+        "sniper_flip_near":     15,               # pts — right at flip level
+        "sniper_flip_far":      40,               # pts — approaching flip
+        "sniper_wall_near":     25,               # pts — near a wall
+        "sniper_wall_far":      50,               # pts — approaching a wall
+        "sniper_wall_touch":    10,               # pts — essentially at the wall
+        "sniper_straddle_low":  80,               # straddle floor for expiry penalty
     },
     "SENSEX": {
         "spot_symbol":          "BSE:SENSEX",
@@ -86,6 +99,19 @@ INSTRUMENT_PROFILES = {
         "magnet_far":           200,
         "ml_move_min":          60,
         "ml_move_max":          240,
+        # Sniper trend scoring thresholds (~3x NIFTY)
+        "sniper_trend_move":    [90, 150, 240],
+        "sniper_trend_speed":   [3, 6, 15],
+        "sniper_trend_roc":     [-3, 3, 9],
+        "trend_regime_override": 150,
+        "backtest_min_pts":     150,
+        # Sniper gamma/wall scoring thresholds (~3x NIFTY)
+        "sniper_flip_near":     45,
+        "sniper_flip_far":      120,
+        "sniper_wall_near":     75,
+        "sniper_wall_far":      150,
+        "sniper_wall_touch":    30,
+        "sniper_straddle_low":  240,
     },
 }
 

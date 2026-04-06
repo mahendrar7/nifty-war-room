@@ -41,6 +41,7 @@ CANDLE_MINUTES  = 15          # resample resolution
 FORWARD_CANDLES = 2           # how many candles ahead to predict
 MIN_SAMPLES     = 40          # minimum samples needed to train
 PROBA_THRESHOLD = 0.55        # minimum confidence to fire a signal
+FEEDBACK_MIN_CANDLES = 1000   # don't let feedback influence model until enough data
 DEFAULT_X       = 40          # default point threshold — overridden by straddle/2
 
 
@@ -313,7 +314,7 @@ class Resampler:
 # =============================================================================
 # TARGET BUILDER
 # =============================================================================
-def build_targets(candles_df, x_points=None):
+def build_targets(candles_df, x_points=None, instrument="nifty"):
     """
     Build the target variable for each candle:
       1  = spot moves up >= x_points within next FORWARD_CANDLES candles
@@ -333,7 +334,7 @@ def build_targets(candles_df, x_points=None):
         # Cap between 20 and 80 points — practical intraday range for NIFTY
         from config import INSTRUMENT_PROFILES
         # Use instrument-specific move thresholds if available
-        inst_name = getattr(self, '_instrument', 'nifty').upper()
+        inst_name = instrument.upper()
         prof = INSTRUMENT_PROFILES.get(inst_name, {})
         ml_min = prof.get("ml_move_min", 20)
         ml_max = prof.get("ml_move_max", 80)
@@ -448,7 +449,7 @@ class MLEngine:
             print(f"  ⚠ Only {len(candles)} candles — model will be weak. Keep accumulating data.")
 
         print("  Building targets...")
-        candles, self.x_points = build_targets(candles)
+        candles, self.x_points = build_targets(candles, instrument=self._instrument)
         print(f"  Target distribution:\n{candles['target'].value_counts().to_string()}")
 
         print("  Adding lag features...")
@@ -532,7 +533,7 @@ class MLEngine:
             lower_x = self.x_points * 0.8
             self.dataset, self.x_points = build_targets(
                 self.dataset.drop(columns=["target","future_high","future_low"], errors="ignore"),
-                x_points=lower_x
+                x_points=lower_x, instrument=self._instrument
             )
             self.dataset = add_lag_features(self.dataset)
             print(f"  Retrying with X = {self.x_points:.1f} pts")
@@ -784,8 +785,10 @@ class MLEngine:
         print(f"  Using {len(recent)} files: {[os.path.basename(f) for f in recent]}")
         self.build_dataset(recent)
 
-        # Apply feedback weights if ledger exists
-        if os.path.exists(self.feedback_file) and self.dataset is not None:
+        # Apply feedback weights if ledger exists AND we have enough data
+        n_candles = len(self.dataset) if self.dataset is not None else 0
+        if (os.path.exists(self.feedback_file) and self.dataset is not None
+                and n_candles >= FEEDBACK_MIN_CANDLES):
             try:
                 ledger = FeedbackLedger(self.feedback_file)
                 ts     = self.dataset.index.tolist()
@@ -800,6 +803,8 @@ class MLEngine:
                 print(f"  ⚠ Feedback weighting failed ({e}) — training without weights")
                 self.train()
         else:
+            if n_candles < FEEDBACK_MIN_CANDLES and os.path.exists(self.feedback_file):
+                print(f"  📊 Feedback logged but not applied yet ({n_candles}/{FEEDBACK_MIN_CANDLES} candles)")
             self.train()
 
 
@@ -1128,12 +1133,13 @@ class MLSignal:
             self.engine.x_points = self.engine.x_points   # keep threshold stable
             result = self.engine.predict_latest(features)
 
-            # Override with dynamic threshold from feedback
-            dyn_threshold = self.ledger.dynamic_threshold
-            if result["confidence"] < dyn_threshold and result["signal"] != 0:
-                result["signal"]    = 0
-                result["label"]     = "⚪ NO MOVE"
-                result["threshold"] = dyn_threshold
+            # Override with dynamic threshold from feedback (only after enough data)
+            if len(self.ledger._df) >= FEEDBACK_MIN_CANDLES:
+                dyn_threshold = self.ledger.dynamic_threshold
+                if result["confidence"] < dyn_threshold and result["signal"] != 0:
+                    result["signal"]    = 0
+                    result["label"]     = "⚪ NO MOVE"
+                    result["threshold"] = dyn_threshold
 
             # Record prediction for outcome tracking
             self.ledger.record_prediction(candle_bucket, result, spot)
@@ -1159,7 +1165,8 @@ class MLSignal:
 if __name__ == "__main__":
     import sys
 
-    engine = MLEngine()
+    instrument = sys.argv[2] if len(sys.argv) > 2 else "nifty"
+    engine = MLEngine(instrument=instrument)
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else "train"
 
@@ -1181,7 +1188,7 @@ if __name__ == "__main__":
     else:
         # Default: build from all available logs and train
         print("Building dataset from all available logs...")
-        engine.build_dataset("data/options_log_1min*.csv")
+        engine.build_dataset(engine.csv_glob)
 
         if engine.dataset is not None and len(engine.dataset) >= 5:
             engine.train()

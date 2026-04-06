@@ -215,15 +215,15 @@ def api_exit():
 
     now_str = datetime.now().strftime("%H:%M")
 
+    # Read snapshot BEFORE writing exit command (war room clears active_trade on exit)
+    snap = read_snapshot(instrument)
+    at = snap.get("active_trade") if snap else None
+
     cmd = {
         "action": "exit",
         "time": now_str,
     }
     write_command(instrument, cmd)
-
-    # Log exit
-    snap = read_snapshot(instrument)
-    at = snap.get("active_trade") if snap else None
     log_row = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "instrument": instrument,
@@ -261,31 +261,31 @@ def api_history():
     # gets matched to the ENTER that comes right after it (i.e. the
     # most recent entry before that exit chronologically)
     trades = []
-    pending_exits = {}  # instrument -> list of exit rows waiting for a match
+    pending_exits = {}  # (instrument, strike, option_type) -> list of exit rows
     for r in rows:
         if r["action"] == "EXIT":
-            inst_key = r.get("instrument", "")
-            pending_exits.setdefault(inst_key, []).append(r)
+            match_key = (r.get("instrument", ""), r.get("strike", ""), r.get("option_type", ""))
+            pending_exits.setdefault(match_key, []).append(r)
         elif r["action"] == "ENTER":
-            inst_key = r.get("instrument", "")
+            match_key = (r.get("instrument", ""), r.get("strike", ""), r.get("option_type", ""))
             exit_row = None
-            if inst_key in pending_exits and pending_exits[inst_key]:
-                exit_row = pending_exits[inst_key].pop(0)
+            if match_key in pending_exits and pending_exits[match_key]:
+                exit_row = pending_exits[match_key].pop(0)
 
             entry_price = float(r.get("price", 0) or 0)
             exit_price = float(exit_row.get("price", 0) or 0) if exit_row else 0
             pnl = None
             if exit_row and exit_price:
-                lot_size = INSTRUMENT_PROFILES.get(inst_key, {}).get("lot_size", 65)
+                lot_size = INSTRUMENT_PROFILES.get(match_key[0], {}).get("lot_size", 65)
                 lots_val = int(r.get("lots", 1) or 1)
                 gross = (exit_price - entry_price) * lot_size * lots_val
                 turnover = (entry_price + exit_price) * lot_size * lots_val
                 brokerage = 40  # flat per round trip
-                commission = turnover * 0.037
+                commission = turnover * 0.00136
                 pnl = round(gross - brokerage - commission, 2)
 
             trade = {
-                "instrument": inst_key,
+                "instrument": match_key[0],
                 "strike": r.get("strike", ""),
                 "option_type": r.get("option_type", ""),
                 "entry_price": r.get("price", ""),
