@@ -119,8 +119,16 @@ class PriceTracker:
             gain_from_entry = ltp - self.entry_price
             peak_gain = self.peak_price - self.entry_price
 
+            # Guard: don't advance past HARD_STOP until the move is real
+            # Under 150: need 25pts absolute (10% is too small, just noise)
+            # Over 150: need 10% gain (already 15+ pts, percentage works)
+            if self.entry_price < 150:
+                breakeven_met = gain_from_entry >= 25
+            else:
+                breakeven_met = self.gain_pct >= PT_BREAKEVEN_TRIGGER
+
             if self.phase == "HARD_STOP":
-                if self.gain_pct >= PT_BREAKEVEN_TRIGGER:
+                if breakeven_met:
                     self.phase = "BREAKEVEN"
                     self.notify(
                         f"📊 Price tracker: +{self.gain_pct:.0%} from entry "

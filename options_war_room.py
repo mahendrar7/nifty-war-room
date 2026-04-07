@@ -242,6 +242,7 @@ from heavyweight_momentum import (
     save_hw_history, restore_hw_history, clear_hw_history,
 )
 from price_tracker import PriceTracker, resolve_option_symbol
+from radar import radar_scan
 
 init(autoreset=True)
 
@@ -598,12 +599,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         # FIX: ML kill switch — suppress ML when it's been consistently wrong
         # Only activate kill switch after enough training data (1000 candles)
         from config import ML_CONSECUTIVE_WRONG_KILL
-        from ml_engine import FEEDBACK_MIN_CANDLES
-        ml_has_enough_data = (ml is not None and hasattr(ml, 'engine')
-                              and ml.engine.dataset is not None
-                              and len(ml.engine.dataset) >= FEEDBACK_MIN_CANDLES)
-        ml_killed = (ml_has_enough_data
-                     and state.ml_consecutive_wrong >= ML_CONSECUTIVE_WRONG_KILL)
+        ml_killed = (state.ml_consecutive_wrong >= ML_CONSECUTIVE_WRONG_KILL)
 
         if ml_killed or state.last_ml_result["signal"] == 0:
             ml_signal = "neutral"
@@ -925,6 +921,55 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
             _stop_price_tracker()
             state.active_trade = None
 
+    # RADAR — anticipatory setup scanner (recompute every 3 min, print every tick)
+    if should_compute("radar"):
+        radar_result = radar_scan(
+            spot=spot, flip_level=flip_level,
+            call_wall=call_wall, put_wall=put_wall,
+            df=df, prev_df=state.previous_snapshot,
+            momentum_data=momentum_data,
+            straddle_history=None,
+            profile=PROFILE,
+            spot_history=list(state.spot_history),
+        )
+        cache_result("radar", radar_result)
+
+        # Telegram alert for new setups (only on recompute)
+        if radar_result.get("active") and state.active_trade is None:
+            r_dir = radar_result["direction"] or "NEUTRAL"
+            r_str = radar_result["strength"]
+            _radar_key = f"{r_dir}_{radar_result.get('key_level')}"
+            if not hasattr(state, '_last_radar_alert') or state._last_radar_alert != _radar_key:
+                state._last_radar_alert = _radar_key
+                notify(
+                    f"📡 RADAR: {r_dir} setup forming (str:{r_str})\n"
+                    + "\n".join(s["narrative"] for s in radar_result["signals"])
+                    + f"\n👁 {radar_result.get('watch_for', '')}"
+                )
+    else:
+        radar_result = get_cached("radar", {"active": False, "direction": None,
+                                             "strength": 0, "signals": [],
+                                             "narrative": "No setup forming",
+                                             "key_level": None, "watch_for": None})
+
+    # Print radar status every tick
+    if radar_result.get("active"):
+        r_dir = radar_result["direction"] or "NEUTRAL"
+        r_str = radar_result["strength"]
+        r_color = Fore.GREEN if r_dir == "LONG" else Fore.RED if r_dir == "SHORT" else Fore.YELLOW
+        sig_names = " + ".join(s["signal"] for s in radar_result["signals"])
+        print(Fore.MAGENTA + f"{'─' * 63}" + Style.RESET_ALL)
+        print(f"📡 RADAR: {r_color}{Style.BRIGHT}{r_dir} setup (str:{r_str}){Style.RESET_ALL}"
+              f" — {sig_names}")
+        for sig in radar_result["signals"]:
+            s_color = Fore.GREEN if sig["direction"] == "LONG" else Fore.RED if sig["direction"] == "SHORT" else Fore.YELLOW
+            print(f"   {s_color}▸ {sig['signal']}: {sig['narrative']}{Style.RESET_ALL}")
+        if radar_result.get("watch_for"):
+            print(f"   {Fore.WHITE}👁 {radar_result['watch_for']}{Style.RESET_ALL}")
+        print(Fore.MAGENTA + f"{'─' * 63}" + Style.RESET_ALL)
+    else:
+        print(f"📡 RADAR: {Fore.WHITE}quiet — no setup{Style.RESET_ALL}")
+
     # SNIPER — decides WHETHER to trade and DIRECTION
     sniper_result = sniper_display(
         spot=spot, bias=bias, confidence=confidence,
@@ -941,6 +986,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         gamma_history=list(state.gamma_history),
         spot_history=list(state.spot_history),
         profile=PROFILE,
+        radar_result=radar_result,
     )
 
     # TRADE SUGGESTION — only when sniper endorses
@@ -1177,6 +1223,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         trade=trade, htl=htl, htl_source=htl_source,
         days_to_expiry=days_to_expiry, hw_momentum=hw_momentum,
         hw_stall=hw_stall, hw_roc_trend=hw_roc_trend,
+        radar=radar_result,
     )
 
     return gamma, straddle, bias, trap_prob, count
@@ -1296,6 +1343,21 @@ def _write_snapshot(**kw):
             snap["heavyweights"]["stalled"] = True
         if kw["hw_roc_trend"]:
             snap["heavyweights"]["roc_trend"] = kw["hw_roc_trend"]
+
+    # Radar — always include so mobile app can show status
+    radar = kw.get("radar")
+    if radar and radar.get("active"):
+        snap["radar"] = {
+            "active": True,
+            "direction": radar["direction"],
+            "strength": radar["strength"],
+            "signals": radar["signals"],
+            "narrative": radar["narrative"],
+            "key_level": radar["key_level"],
+            "watch_for": radar["watch_for"],
+        }
+    else:
+        snap["radar"] = {"active": False}
 
     path = f"data/snapshot_{_instrument_arg.lower()}.json"
     tmp  = path + ".tmp"

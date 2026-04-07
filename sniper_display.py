@@ -856,6 +856,30 @@ def _conf_label(score):
 
 
 # ─────────────────────────────────────────────────────────────
+# HIGHER TIMEFRAME TREND
+# ─────────────────────────────────────────────────────────────
+
+def _htf_trend(spot_history, lookback):
+    """
+    Compute higher timeframe trend from spot history.
+    Returns "UP", "DOWN", or "FLAT".
+    lookback: number of 1-min candles (e.g. 15 for 15-min trend).
+    """
+    if len(spot_history) < lookback:
+        return None
+    old = spot_history[-lookback]
+    new = spot_history[-1]
+    move = new - old
+    # Use 0.05% of spot as noise threshold (~11pts for NIFTY, ~37pts for SENSEX)
+    threshold = old * 0.0005
+    if move > threshold:
+        return "UP"
+    elif move < -threshold:
+        return "DOWN"
+    return "FLAT"
+
+
+# ─────────────────────────────────────────────────────────────
 # MAIN DISPLAY
 # ─────────────────────────────────────────────────────────────
 
@@ -874,6 +898,7 @@ def sniper_display(
     gamma_history=None,
     spot_history=None,
     profile=None,
+    radar_result=None,
 ):
     """
     Call this at the end of print_dashboard().
@@ -931,6 +956,44 @@ def sniper_display(
        (bias == "BEARISH" and direction == "LONG"):
         total -= 1.0
 
+    # ── Higher timeframe filter ───────────────────────────────
+    # Penalise trades against the 15-min and 30-min trend
+    htf_adj = 0.0
+    htf_tag = ""
+    if spot_history and direction in ("LONG", "SHORT"):
+        htf15 = _htf_trend(spot_history, 15)
+        htf30 = _htf_trend(spot_history, 30)
+        if htf15 and htf30:
+            aligned = 0
+            opposed = 0
+            for htf_dir in (htf15, htf30):
+                if (direction == "LONG" and htf_dir == "UP") or \
+                   (direction == "SHORT" and htf_dir == "DOWN"):
+                    aligned += 1
+                elif htf_dir != "FLAT":
+                    opposed += 1
+            if aligned == 2:
+                htf_adj = 0.5
+                htf_tag = "HTF+"
+            elif opposed == 2:
+                htf_adj = -1.5
+                htf_tag = "HTF--"
+            total += htf_adj
+
+    # ── Radar confluence ──────────────────────────────────────
+    # Radar = structural/anticipatory. Independent of HTF trend.
+    radar_adj = 0.0
+    radar_tag = ""
+    if radar_result and radar_result.get("active") and direction in ("LONG", "SHORT"):
+        r_dir = (radar_result.get("direction") or "").upper()
+        if r_dir == direction:
+            radar_adj = 0.5
+            radar_tag = "RAD+"
+        elif r_dir and r_dir != direction:
+            radar_adj = -1.0
+            radar_tag = "RAD-"
+        total += radar_adj
+
     total = round(max(0.0, min(10.0, total)), 1)
     total_int = int(round(total))
 
@@ -964,10 +1027,17 @@ def sniper_display(
 
     # ── Print — compact, matches war room density ──────────────
     print(Fore.CYAN + f"{'─' * 63}" + Style.RESET_ALL)
+    htf_display = ""
+    if htf_tag:
+        htf_color = Fore.GREEN if htf_adj > 0 else Fore.RED
+        htf_display = f"  {htf_color}{htf_tag}({htf_adj:+.1f}){Style.RESET_ALL}"
+    if radar_tag:
+        r_color = Fore.GREEN if radar_adj > 0 else Fore.RED
+        htf_display += f"  {r_color}{radar_tag}({radar_adj:+.1f}){Style.RESET_ALL}"
     print(f"🎯 SNIPER  [{bar}] {total_int}/10{score_check}"
           f"  {Fore.WHITE}{Style.BRIGHT}{setup}{Style.RESET_ALL}"
           f"  {dir_color}{direction}{Style.RESET_ALL}"
-          f"  {conf_color}{conf_text}{Style.RESET_ALL}")
+          f"  {conf_color}{conf_text}{Style.RESET_ALL}{htf_display}")
     print(f"{action_icon}  {action_color}{Style.BRIGHT}{action_text}{Style.RESET_ALL}")
     print(Fore.CYAN + f"{'─' * 63}" + Style.RESET_ALL)
 
@@ -1011,4 +1081,8 @@ def sniper_display(
         "confidence": conf_text,
         "action": action_text,
         "signal_scores": scores,
+        "htf": htf_tag,
+        "htf_adj": htf_adj,
+        "radar": radar_tag,
+        "radar_adj": radar_adj,
     }

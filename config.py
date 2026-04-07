@@ -282,6 +282,7 @@ THROTTLE_INTERVALS = {
     "gravity":        3,    # premium gravity — 3 min
     "pcr":            3,    # put/call ratio — 3 min
     "oi_imbalance":   3,    # OI imbalance — 3 min
+    "radar":          3,    # anticipatory setup scanner — 3 min
 }
 # Computed every tick (1 min): spot, gamma, GEX, straddle, walls,
 # flip level, OI change, velocity, bias, regime, acceleration,

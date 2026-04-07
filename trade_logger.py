@@ -129,27 +129,40 @@ def get_strikes(instrument):
 @auth_required
 def api_state(instrument):
     instrument = instrument.upper()
-    snap = read_snapshot(instrument)
-    strikes = get_strikes(instrument)
+    snap = read_snapshot(instrument) or {}
     profile = INSTRUMENT_PROFILES.get(instrument, {})
 
-    result = {
-        "instrument": instrument,
-        "strikes": strikes,
-        "spot": snap.get("spot") if snap else None,
-        "active_trade": snap.get("active_trade") if snap else None,
-        "htl": snap.get("htl") if snap else None,
-        "sniper": snap.get("sniper") if snap else None,
-        "suggestion": snap.get("suggestion") if snap else None,
-        "lot_size": profile.get("lot_size", 65),
-        "heavyweights": snap.get("heavyweights") if snap else None,
-        "bias": snap.get("bias") if snap else None,
-        "action": snap.get("action") if snap else None,
-        "call_wall": snap.get("call_wall") if snap else None,
-        "put_wall": snap.get("put_wall") if snap else None,
-        "gravity": snap.get("gravity") if snap else None,
-    }
+    # Return full snapshot + profile extras
+    result = dict(snap)
+    result["instrument"] = instrument
+    result["lot_size"] = profile.get("lot_size", 65)
+    result["strikes"] = get_strikes(instrument)
     return jsonify(result)
+
+
+@app.route("/api/signals/<instrument>")
+@auth_required
+def api_signals(instrument):
+    """Return last N signal log entries as JSON."""
+    instrument = instrument.lower()
+    date_str = datetime.now().strftime("%d%m%Y")
+    csv_path = f"data/signals_log_{instrument}_{date_str}.csv"
+
+    limit = int(request.args.get("limit", 30))
+
+    if not os.path.exists(csv_path):
+        return jsonify([])
+
+    rows = []
+    try:
+        with open(csv_path, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
+        # Return last N rows, most recent first
+        return jsonify(list(reversed(rows[-limit:])))
+    except Exception:
+        return jsonify([])
 
 
 @app.route("/api/enter", methods=["POST"])
@@ -790,6 +803,14 @@ setInterval(loadState, 3000);
 @auth_required
 def index():
     return render_template_string(HTML)
+
+
+@app.route("/mobile")
+@auth_required
+def mobile():
+    mobile_path = os.path.join(os.path.dirname(__file__), "mobile_app.html")
+    with open(mobile_path, "r") as f:
+        return f.read()
 
 
 # =============================================================================
