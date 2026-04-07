@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0d1117">
+<title>War Room</title>
+<style>
+  :root {
+    --bg: #0d1117; --bg-card: #161b22; --border: #21262d;
+    --text: #f0f6fc; --text-dim: #c9d1d9; --text-muted: #8b949e; --text-faint: #484f58;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922; --blue: #388bfd;
+    --green-bg: rgba(63,185,80,0.12); --red-bg: rgba(248,81,73,0.12);
+    --yellow-bg: rgba(210,153,34,0.12); --blue-bg: rgba(56,139,253,0.12);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body {
+    background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'SF Pro','Segoe UI',sans-serif;
+    overflow-x:hidden; padding-bottom:80px; padding-top: env(safe-area-inset-top);
+  }
+
+  /* Header */
+  .header {
+    position:sticky; top:0; z-index:100; background:var(--bg);
+    border-bottom:1px solid var(--border); padding:12px 16px 10px;
+    display:flex; justify-content:space-between; align-items:center;
+  }
+  .header h1 { font-size:20px; font-weight:700; }
+  .tabs { display:flex; gap:6px; }
+  .tab {
+    padding:5px 14px; border-radius:14px; font-size:12px; font-weight:600;
+    cursor:pointer; transition:all 0.2s;
+  }
+  .tab.active { background:var(--green); color:#fff; }
+  .tab:not(.active) { background:var(--border); color:var(--text-muted); }
+
+  /* Views */
+  .view { display:none; padding:12px 14px; }
+  .view.active { display:block; }
+
+  /* Spot */
+  .spot-section { text-align:center; padding:6px 0 14px; }
+  .spot-price { font-size:36px; font-weight:700; letter-spacing:-1px; }
+  .spot-change { font-size:14px; font-weight:600; margin-top:2px; }
+  .spot-change.up { color:var(--green); }
+  .spot-change.down { color:var(--red); }
+  .spot-meta { display:flex; justify-content:center; gap:8px; margin-top:6px; flex-wrap:wrap; }
+
+  /* Pill */
+  .pill {
+    padding:3px 10px; border-radius:10px; font-size:11px; font-weight:600; letter-spacing:0.3px;
+    white-space:nowrap;
+  }
+  .pill-green { background:var(--green-bg); color:var(--green); }
+  .pill-red { background:var(--red-bg); color:var(--red); }
+  .pill-yellow { background:var(--yellow-bg); color:var(--yellow); }
+  .pill-grey { background:rgba(139,148,158,0.12); color:var(--text-muted); }
+  .pill-blue { background:var(--blue-bg); color:var(--blue); }
+
+  /* Card */
+  .card {
+    background:var(--bg-card); border:1px solid var(--border); border-radius:12px;
+    padding:12px 14px; margin-bottom:10px;
+  }
+  .card-header {
+    display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;
+  }
+  .card-title {
+    color:var(--text-muted); font-size:11px; font-weight:600; letter-spacing:0.8px; text-transform:uppercase;
+  }
+
+  /* Sniper */
+  .sniper-action { font-size:22px; font-weight:800; margin:2px 0; }
+  .sniper-action.take { color:var(--green); }
+  .sniper-action.stalk { color:var(--yellow); }
+  .sniper-action.stand-down { color:var(--text-muted); }
+  .sniper-action.locked { color:var(--text-faint); }
+  .sniper-action.chop { color:var(--red); }
+  .sniper-meta { display:flex; gap:10px; font-size:12px; color:var(--text-muted); flex-wrap:wrap; }
+  .sniper-meta b { color:var(--text-dim); }
+  .score-bar { height:6px; background:var(--border); border-radius:3px; margin-top:8px; overflow:hidden; }
+  .score-fill { height:100%; border-radius:3px; transition:width 0.5s ease; }
+
+  /* Radar */
+  .radar-card { border-left:3px solid var(--yellow); }
+  .radar-card.long { border-left-color:var(--green); }
+  .radar-card.short { border-left-color:var(--red); }
+  .radar-dir { font-size:18px; font-weight:800; margin:2px 0; }
+  .radar-dir.long { color:var(--green); }
+  .radar-dir.short { color:var(--red); }
+  .radar-signal { font-size:12px; color:var(--text-muted); padding:2px 0; }
+  .radar-signal b { color:var(--text-dim); }
+  .radar-watch { font-size:11px; color:var(--yellow); margin-top:6px; font-style:italic; }
+
+  /* Wall visual */
+  .wall-bar {
+    position:relative; height:32px; background:var(--border); border-radius:6px;
+    margin:8px 0 4px; overflow:visible;
+  }
+  .wall-label { position:absolute; top:-14px; font-size:10px; font-weight:600; }
+  .wall-label.left { left:0; color:var(--red); }
+  .wall-label.right { right:0; color:var(--green); }
+  .wall-spot {
+    position:absolute; top:4px; width:3px; height:24px; background:var(--text);
+    border-radius:2px; box-shadow:0 0 8px rgba(240,246,252,0.4); transition:left 0.5s ease;
+  }
+  .wall-flip { position:absolute; top:0; width:1px; height:32px; background:var(--yellow); opacity:0.5; }
+  .wall-values { display:flex; justify-content:space-between; font-size:10px; color:var(--text-faint); margin-top:2px; }
+
+  /* HTL */
+  .htl-verdict { font-size:26px; font-weight:800; display:flex; align-items:center; gap:8px; }
+  .htl-verdict.hold { color:var(--green); }
+  .htl-verdict.trail { color:var(--yellow); }
+  .htl-verdict.exit { color:var(--red); }
+  .htl-reason { font-size:12px; color:var(--text-muted); margin-top:3px; }
+
+  /* Trade */
+  .trade-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:6px; }
+  .trade-field label { font-size:10px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.5px; }
+  .trade-field .val { font-size:16px; font-weight:700; color:var(--text-dim); margin-top:1px; }
+  .trade-pnl {
+    text-align:center; padding:10px; border-radius:8px; margin-top:8px;
+  }
+  .trade-pnl .amount { font-size:24px; font-weight:800; }
+  .trade-pnl .label { font-size:10px; color:var(--text-muted); text-transform:uppercase; letter-spacing:1px; }
+
+  /* Suggestion */
+  .suggestion {
+    background:rgba(35,134,54,0.08); border:1px solid rgba(35,134,54,0.25);
+    border-radius:12px; padding:12px 14px; margin-bottom:10px;
+    animation: pulse-border 2s ease-in-out infinite;
+  }
+  @keyframes pulse-border {
+    0%,100% { border-color:rgba(35,134,54,0.25); }
+    50% { border-color:rgba(35,134,54,0.6); }
+  }
+  .suggestion-header { display:flex; justify-content:space-between; align-items:center; }
+  .suggestion-strike { font-size:20px; font-weight:800; color:var(--green); }
+  .suggestion-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; margin-top:8px; }
+  .suggestion-field label { font-size:9px; color:var(--text-faint); text-transform:uppercase; }
+  .suggestion-field .val { font-size:14px; font-weight:700; color:var(--text-dim); }
+
+  /* Buttons */
+  .action-buttons { display:flex; gap:10px; margin-top:10px; }
+  .btn {
+    flex:1; padding:13px; border:none; border-radius:10px; font-size:14px;
+    font-weight:700; text-align:center; cursor:pointer; letter-spacing:0.3px;
+  }
+  .btn-enter { background:#238636; color:#fff; }
+  .btn-exit { background:#da3633; color:#fff; }
+  .btn-disabled { background:var(--border); color:var(--text-faint); pointer-events:none; }
+  .btn:active { opacity:0.7; }
+
+  /* HW rows */
+  .hw-row { display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid var(--border); }
+  .hw-row:last-child { border-bottom:none; }
+  .hw-name { color:var(--text-dim); font-size:13px; }
+  .hw-roc { font-size:13px; font-weight:700; }
+
+  /* Feed */
+  .feed-item { padding:10px 0; border-bottom:1px solid var(--border); }
+  .feed-item:last-child { border-bottom:none; }
+  .feed-time { font-size:11px; color:var(--text-faint); font-weight:600; }
+  .feed-text { font-size:13px; color:var(--text-dim); margin-top:2px; line-height:1.4; }
+
+  /* History */
+  .trade-row { padding:10px 0; border-bottom:1px solid var(--border); }
+  .trade-row:last-child { border-bottom:none; }
+  .trade-row-header { display:flex; justify-content:space-between; align-items:center; }
+  .trade-row-strike { font-size:14px; font-weight:700; color:var(--text-dim); }
+  .trade-row-pnl { font-size:14px; font-weight:700; }
+  .trade-row-meta { font-size:11px; color:var(--text-faint); margin-top:2px; }
+
+  /* Bottom nav */
+  .bottom-nav {
+    position:fixed; bottom:0; left:0; right:0; height:70px;
+    background:var(--bg-card); border-top:1px solid var(--border);
+    display:flex; justify-content:space-around; align-items:center;
+    padding-bottom:env(safe-area-inset-bottom, 10px); z-index:100;
+  }
+  .nav-item {
+    text-align:center; font-size:10px; color:var(--text-faint); font-weight:600;
+    cursor:pointer; padding:6px 12px;
+  }
+  .nav-item.active { color:var(--blue); }
+  .nav-icon { font-size:20px; display:block; margin-bottom:2px; }
+
+  /* Status dot */
+  .status-dot {
+    display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px;
+    animation: blink 2s ease-in-out infinite;
+  }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  .status-dot.live { background:var(--green); }
+  .status-dot.stale { background:var(--yellow); }
+  .status-dot.offline { background:var(--red); }
+
+  /* Loading */
+  .loading { text-align:center; padding:40px; color:var(--text-muted); }
+
+  /* Scroll */
+  .content-scroll { max-height:calc(100vh - 130px); overflow-y:auto; -webkit-overflow-scrolling:touch; }
+
+  /* Empty state */
+  .empty { text-align:center; padding:30px; color:var(--text-faint); font-size:13px; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <h1><span class="status-dot live" id="statusDot"></span> War Room</h1>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <div class="tabs">
+      <div class="tab active" onclick="switchInstrument('NIFTY')" id="tab-NIFTY">NIFTY</div>
+      <div class="tab" onclick="switchInstrument('SENSEX')" id="tab-SENSEX">SENSEX</div>
+    </div>
+    <div id="notifBell" onclick="toggleAudio()" style="font-size:20px;cursor:pointer;opacity:0.4;user-select:none;" title="Enable audio alerts">&#128264;</div>
+  </div>
+</div>
+
+<!-- Dashboard View -->
+<div class="view active" id="view-dashboard">
+  <div id="dashboard-content">
+    <div class="loading">Connecting to War Room...</div>
+  </div>
+</div>
+
+<!-- Signals View -->
+<div class="view" id="view-signals">
+  <div id="signals-content">
+    <div class="loading">Loading signals...</div>
+  </div>
+</div>
+
+<!-- Trades View -->
+<div class="view" id="view-trades">
+  <div id="trades-content">
+    <div class="loading">Loading trades...</div>
+  </div>
+</div>
+
+<!-- Bottom Nav -->
+<div class="bottom-nav">
+  <div class="nav-item active" onclick="switchView('dashboard')" id="nav-dashboard">
+    <span class="nav-icon">&#9673;</span>Dashboard
+  </div>
+  <div class="nav-item" onclick="switchView('signals')" id="nav-signals">
+    <span class="nav-icon">&#9889;</span>Signals
+  </div>
+  <div class="nav-item" onclick="switchView('trades')" id="nav-trades">
+    <span class="nav-icon">&#9733;</span>Trades
+  </div>
+</div>
+
+<script>
+// ── Config ────────────────────────────────────────────────────
+const API_BASE = window.location.origin;
+let INSTRUMENT = 'NIFTY';
+let currentView = 'dashboard';
+let lastState = null;
+let pollTimer = null;
+let prevSpot = null;
+let prevNotifState = {};  // tracks previous values for change detection
+
+// ── Auth header ───────────────────────────────────────────────
+function authHeaders() {
+  const user = localStorage.getItem('wr_user') || '';
+  const pass = localStorage.getItem('wr_pass') || '';
+  if (user && pass) {
+    return { 'Authorization': 'Basic ' + btoa(user + ':' + pass) };
+  }
+  return {};
+}
+
+function promptAuth() {
+  const user = prompt('Username:');
+  const pass = prompt('Password:');
+  if (user && pass) {
+    localStorage.setItem('wr_user', user);
+    localStorage.setItem('wr_pass', pass);
+    location.reload();
+  }
+}
+
+// ── API calls ─────────────────────────────────────────────────
+async function fetchState() {
+  try {
+    const res = await fetch(`${API_BASE}/api/state/${INSTRUMENT}`, { headers: authHeaders() });
+    if (res.status === 401) { promptAuth(); return null; }
+    if (!res.ok) return null;
+    return await res.json();
+  } catch(e) { return null; }
+}
+
+async function fetchSignals() {
+  try {
+    const res = await fetch(`${API_BASE}/api/signals/${INSTRUMENT}?limit=50`, { headers: authHeaders() });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch(e) { return []; }
+}
+
+async function fetchHistory() {
+  try {
+    const res = await fetch(`${API_BASE}/api/history`, { headers: authHeaders() });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch(e) { return []; }
+}
+
+async function apiEnter(data) {
+  const res = await fetch(`${API_BASE}/api/enter`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  });
+  return await res.json();
+}
+
+async function apiExit(data) {
+  const res = await fetch(`${API_BASE}/api/exit`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(data),
+  });
+  return await res.json();
+}
+
+// ── Helpers ───────────────────────────────────────────────────
+function pill(text, type) {
+  return `<span class="pill pill-${type}">${text}</span>`;
+}
+
+function biasColor(bias) {
+  if (!bias) return 'grey';
+  const b = bias.toUpperCase();
+  if (b.includes('BULLISH')) return 'green';
+  if (b.includes('BEARISH')) return 'red';
+  return 'grey';
+}
+
+function sniperActionClass(action) {
+  if (!action) return 'stand-down';
+  const a = action.toUpperCase();
+  if (a.includes('TAKE TRADE') || a.includes('SEND IT')) return 'take';
+  if (a.includes('STALK') || a.includes('WAIT')) return 'stalk';
+  if (a.includes('LOCKED')) return 'locked';
+  if (a.includes('CHOP')) return 'chop';
+  return 'stand-down';
+}
+
+function scoreBarColor(score) {
+  if (score >= 5) return 'background:var(--green)';
+  if (score >= 4) return 'background:var(--yellow)';
+  return 'background:var(--text-muted)';
+}
+
+function fmt(n, d=0) {
+  if (n == null) return '--';
+  return Number(n).toLocaleString('en-IN', {minimumFractionDigits:d, maximumFractionDigits:d});
+}
+
+function fmtPct(n) {
+  if (n == null) return '--';
+  return (n * 100).toFixed(1) + '%';
+}
+
+// ── Render Dashboard ──────────────────────────────────────────
+function renderDashboard(s) {
+  if (!s || !s.spot) {
+    document.getElementById('dashboard-content').innerHTML =
+      '<div class="empty">No data from war room. Is it running?</div>';
+    return;
+  }
+
+  const spot = s.spot;
+  const atm = s.atm || 0;
+  const change = prevSpot ? spot - prevSpot : 0;
+  const openRef = s.atm || spot; // rough
+  const sniper = s.sniper || {};
+  const htl = s.htl || null;
+  const at = s.active_trade || null;
+  const hw = s.heavyweights || null;
+  const ml = s.ml || null;
+  const callWall = s.call_wall;
+  const putWall = s.put_wall;
+  const flipLevel = s.flip_level;
+
+  let html = '';
+
+  // Spot section
+  const spotDir = change >= 0 ? 'up' : 'down';
+  html += `
+    <div class="spot-section">
+      <div class="spot-price">${fmt(spot, 1)}</div>
+      <div class="spot-change ${spotDir}">
+        ${s.timestamp ? s.timestamp.split(' ')[1] : ''}
+      </div>
+      <div class="spot-meta">
+        ${pill(s.bias || 'RANGE', biasColor(s.bias))}
+        ${pill(s.regime || 'UNCLEAR', 'blue')}
+        ${s.days_to_expiry != null ? pill('DTE: ' + s.days_to_expiry, 'yellow') : ''}
+      </div>
+    </div>`;
+
+  // Suggestion card (if sniper fired TAKE TRADE)
+  const sAction = (sniper.action || '').toUpperCase();
+  if ((sAction.includes('TAKE TRADE') || sAction.includes('SEND IT')) && !at) {
+    // Show prominent suggestion
+    html += `
+      <div class="suggestion">
+        <div class="suggestion-header">
+          <div>
+            <div style="font-size:11px;color:var(--green);font-weight:700;letter-spacing:1px">${sniper.action}</div>
+            <div class="suggestion-strike">${sniper.direction || ''}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:24px;font-weight:800;color:var(--green)">${sniper.score || '--'}</div>
+            <div style="font-size:10px;color:var(--text-muted)">/10</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text-muted);margin:4px 0">
+          ${sniper.setup || ''} - ${sniper.confidence || ''} confidence
+        </div>
+      </div>`;
+  }
+
+  // HTL card (if in trade)
+  if (at && htl) {
+    const verdict = (htl.verdict || 'HOLD').toUpperCase();
+    const vClass = verdict === 'HOLD' ? 'hold' : verdict === 'TRAIL' ? 'trail' : 'exit';
+    const emoji = verdict === 'HOLD' ? '&#x1F4C8;' : verdict === 'TRAIL' ? '&#x26A0;' : '&#x1F6A8;';
+    const borderColor = verdict === 'HOLD' ? 'var(--green)' : verdict === 'TRAIL' ? 'var(--yellow)' : 'var(--red)';
+
+    html += `
+      <div class="card" style="border-color:${borderColor}33;background:${borderColor}08">
+        <div class="card-header">
+          <span class="card-title">Hold The Line</span>
+          <span style="font-size:12px;color:var(--text-muted)">Score: ${htl.score || '--'}</span>
+        </div>
+        <div class="htl-verdict ${vClass}">${emoji} ${verdict}</div>
+      </div>`;
+  }
+
+  // Active Trade card
+  if (at) {
+    const price = htl && htl.price ? htl.price : null;
+    const ltp = price ? price.ltp : null;
+    const entryP = parseFloat(at.entry_price || 0);
+    const pnlPerLot = ltp ? (ltp - entryP) : null;
+    const lots = at.lots || 1;
+    const lotSize = s.lot_size || 65;
+    const totalPnl = pnlPerLot != null ? Math.round(pnlPerLot * lotSize * lots) : null;
+    const pnlColor = totalPnl != null ? (totalPnl >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
+    const pnlBg = totalPnl != null ? (totalPnl >= 0 ? 'var(--green-bg)' : 'var(--red-bg)') : 'var(--border)';
+    const phase = price ? price.phase : '';
+
+    html += `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Active Trade</span>
+          <span class="pill pill-green" style="font-size:12px">${at.strike} ${at.option_type} x${at.lots}</span>
+        </div>
+        <div class="trade-grid">
+          <div class="trade-field"><label>Entry</label><div class="val">${fmt(entryP,1)}</div></div>
+          <div class="trade-field"><label>LTP</label><div class="val" style="color:${pnlColor}">${ltp ? fmt(ltp,1) : '--'}</div></div>
+          <div class="trade-field"><label>Phase</label><div class="val" style="font-size:12px">${phase || '--'}</div></div>
+          <div class="trade-field"><label>Since</label><div class="val" style="font-size:12px">${at.entry_time || '--'}</div></div>
+        </div>
+        ${totalPnl != null ? `
+        <div class="trade-pnl" style="background:${pnlBg}">
+          <div class="label">Unrealized P&L</div>
+          <div class="amount" style="color:${pnlColor}">${totalPnl >= 0 ? '+' : ''}${fmt(totalPnl)}</div>
+        </div>` : ''}
+        <div class="action-buttons">
+          <div class="btn btn-disabled">IN TRADE</div>
+          <div class="btn btn-exit" onclick="doExit()">EXIT</div>
+        </div>
+      </div>`;
+  }
+
+  // Radar card — always visible
+  const radar = s.radar || null;
+  if (radar && radar.active) {
+    const rDir = (radar.direction || '').toUpperCase();
+    const rClass = rDir === 'LONG' ? 'long' : rDir === 'SHORT' ? 'short' : '';
+    const sigNames = radar.signals.map(x => x.signal).join(' + ');
+    html += `
+      <div class="card radar-card ${rClass}">
+        <div class="card-header">
+          <span class="card-title">Radar</span>
+          ${pill('SETUP FORMING', rDir === 'LONG' ? 'green' : rDir === 'SHORT' ? 'red' : 'yellow')}
+        </div>
+        <div class="radar-dir ${rClass}">${rDir === 'LONG' ? '&#9650;' : '&#9660;'} ${rDir || 'NEUTRAL'} <span style="font-size:12px;font-weight:400;color:var(--text-muted)">str:${radar.strength} — ${sigNames}</span></div>
+        ${radar.signals.map(sig =>
+          `<div class="radar-signal">&#9656; <b>${sig.signal}</b>: ${sig.narrative}</div>`
+        ).join('')}
+        ${radar.watch_for ? `<div class="radar-watch">&#128065; ${radar.watch_for}</div>` : ''}
+      </div>`;
+  } else {
+    html += `
+      <div class="card radar-card">
+        <div class="card-header">
+          <span class="card-title">Radar</span>
+        </div>
+        <div style="font-size:13px;color:var(--text-faint);">quiet — no setup</div>
+      </div>`;
+  }
+
+  // Sniper card
+  const sClass = sniperActionClass(sniper.action);
+  const sScore = sniper.score || 0;
+  html += `
+    <div class="card" ${at ? 'style="opacity:0.5"' : ''}>
+      <div class="card-header">
+        <span class="card-title">Sniper</span>
+        ${sniper.setup ? pill(sniper.setup, 'yellow') : ''}
+      </div>
+      <div class="sniper-action ${sClass}">${sniper.action || 'STAND DOWN'}</div>
+      <div class="sniper-meta">
+        Score: <b>${sScore}/10</b> &nbsp;|&nbsp; Dir: <b>${sniper.direction || '--'}</b> &nbsp;|&nbsp; Conf: <b>${sniper.confidence || '--'}</b>${sniper.htf ? ` &nbsp;|&nbsp; HTF <span style="color:${sniper.htf_adj > 0 ? 'var(--green)' : 'var(--red)'}">${sniper.htf_adj > 0 ? '&#9650;' : '&#9660;'}</span>` : ''}
+      </div>
+      <div class="score-bar"><div class="score-fill" style="width:${sScore*10}%;${scoreBarColor(sScore)}"></div></div>
+    </div>`;
+
+  // Structure card (walls)
+  if (callWall && putWall) {
+    const range = callWall - putWall;
+    const spotPct = range > 0 ? ((spot - putWall) / range * 100) : 50;
+    const spotPos = Math.max(2, Math.min(98, spotPct));
+    const flipPct = flipLevel && range > 0 ? ((flipLevel - putWall) / range * 100) : null;
+
+    html += `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Structure</span>
+          <span style="font-size:11px;color:var(--text-muted)">PCR: ${s.pcr ? Number(s.pcr).toFixed(2) : '--'}</span>
+        </div>
+        <div class="wall-bar">
+          <div class="wall-label left">PUT ${fmt(putWall)}</div>
+          <div class="wall-label right">CALL ${fmt(callWall)}</div>
+          ${flipPct != null ? `<div class="wall-flip" style="left:${flipPct}%"></div>` : ''}
+          <div class="wall-spot" style="left:${spotPos}%"></div>
+        </div>
+        <div class="wall-values">
+          <span>Gravity: ${fmt(s.gravity)}</span>
+          <span>${flipLevel ? 'Flip: ' + fmt(flipLevel) : ''}</span>
+          <span>Straddle: ${fmt(s.straddle,0)}</span>
+        </div>
+      </div>`;
+  }
+
+  // Heavyweights
+  if (hw && hw.top_movers) {
+    const dirPill = hw.direction === 'BULLISH' ? pill('BULLISH', 'green') :
+                    hw.direction === 'BEARISH' ? pill('BEARISH', 'red') : pill(hw.direction || '--', 'grey');
+    const trendTag = hw.roc_trend ? ` <span style="font-size:10px;color:var(--text-faint)">${hw.roc_trend}</span>` : '';
+    html += `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Heavyweights</span>
+          ${dirPill}${trendTag}
+        </div>`;
+    for (const m of hw.top_movers) {
+      const rocColor = m.roc >= 0 ? 'color:var(--green)' : 'color:var(--red)';
+      html += `
+        <div class="hw-row">
+          <span class="hw-name">${m.name}</span>
+          <span class="hw-roc" style="${rocColor}">${m.roc >= 0 ? '+' : ''}${(m.roc * 100).toFixed(2)}%</span>
+        </div>`;
+    }
+    html += `</div>`;
+  }
+
+  // ML
+  if (ml) {
+    const mlColor = ml.label.includes('BULLISH') ? 'green' : ml.label.includes('BEARISH') ? 'red' : 'grey';
+    html += `
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">ML Signal</span>
+          ${pill(ml.label.replace(/[^\w\s]/g,'').trim(), mlColor)}
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <span style="color:var(--${mlColor});font-size:18px;font-weight:700">${Math.round(ml.confidence*100)}%</span>
+            <span style="color:var(--text-faint);font-size:12px"> conf</span>
+          </div>
+          <span style="font-size:11px;color:var(--text-muted)">&plusmn;${fmt(ml.x_points,0)}pts</span>
+        </div>
+      </div>`;
+  }
+
+  // Triggers
+  let triggers = [];
+  if (s.liq_accel) triggers.push(`Liq Accel ${s.liq_accel.direction} (${s.liq_accel.conviction}, Score:${s.liq_accel.score})`);
+  if (s.vacuum) triggers.push(`Vacuum ${s.vacuum.direction} (${s.vacuum.status}, Score:${s.vacuum.score})`);
+  if (s.wall_break) triggers.push(`Wall Break ${s.wall_break.direction}`);
+  if (s.flip_breakout) triggers.push(`Flip Breakout ${s.flip_breakout.direction}`);
+  if (s.trap) triggers.push(`${s.trap.type} (${s.trap.confidence}%)`);
+
+  if (triggers.length) {
+    html += `<div class="card"><div class="card-title" style="margin-bottom:6px">ACTIVE TRIGGERS</div>`;
+    for (const t of triggers) {
+      html += `<div style="font-size:12px;color:var(--yellow);padding:2px 0">&#x26A1; ${t}</div>`;
+    }
+    html += `</div>`;
+  }
+
+  prevSpot = spot;
+  document.getElementById('dashboard-content').innerHTML = html;
+}
+
+// ── Render Signals Feed ───────────────────────────────────────
+function renderSignals(signals) {
+  if (!signals.length) {
+    document.getElementById('signals-content').innerHTML = '<div class="empty">No signals today</div>';
+    return;
+  }
+
+  let html = '<div class="card"><div class="card-title" style="margin-bottom:8px">TODAY\'S SIGNALS</div>';
+
+  for (const s of signals) {
+    const time = s.timestamp || '';
+    const sniper = s.sniper_action || '';
+    const regime = s.regime || '';
+    const bias = s.bias || '';
+    const spot = s.spot || '';
+    const trend = s.trend_dir || '';
+    const trendPts = s.trend_pts || '';
+
+    // Filter to interesting events
+    const isSniper = sniper && !sniper.includes('STAND DOWN');
+    const hasTrend = trend && parseFloat(trendPts) > 0;
+    const hasAccel = s.liq_accel === 'True';
+    const hasWallBreak = s.wall_break === 'True';
+    const hasVelocity = s.oi_velocity && s.oi_velocity.includes('SURGE');
+
+    if (!isSniper && !hasAccel && !hasWallBreak && !hasVelocity) continue;
+
+    let icon = '&#x25CF;';
+    let color = 'var(--text-muted)';
+    let text = '';
+
+    if (isSniper) {
+      const sc = s.sniper_score || '';
+      const dir = s.sniper_dir || '';
+      if (sniper.includes('TAKE TRADE') || sniper.includes('SEND IT')) {
+        color = 'var(--green)'; icon = '&#x1F3AF;';
+      } else if (sniper.includes('STALK')) {
+        color = 'var(--yellow)'; icon = '&#x1F440;';
+      } else {
+        color = 'var(--blue)';
+      }
+      text = `${sniper} ${dir} ${sc}/10 ${s.sniper_setup || ''}`;
+    } else if (hasAccel) {
+      color = 'var(--yellow)'; icon = '&#x1F680;';
+      text = `Liq Acceleration ${s.liq_accel_dir || ''} Score:${s.liq_accel_score || ''}`;
+    } else if (hasWallBreak) {
+      color = 'var(--red)'; icon = '&#x1F4A5;';
+      text = `Wall Break ${s.wall_break_dir || ''}`;
+    } else if (hasVelocity) {
+      color = 'var(--blue)'; icon = '&#x26A1;';
+      text = `OI ${s.oi_velocity}`;
+    }
+
+    html += `
+      <div class="feed-item">
+        <span class="feed-time">${time}</span>
+        <div class="feed-text" style="color:${color}">${icon} ${text} <span style="color:var(--text-faint)">Spot:${fmt(parseFloat(spot),1)}</span></div>
+      </div>`;
+  }
+
+  html += '</div>';
+  document.getElementById('signals-content').innerHTML = html;
+}
+
+// ── Render Trade History ──────────────────────────────────────
+function renderTrades(trades) {
+  if (!trades.length) {
+    document.getElementById('trades-content').innerHTML = '<div class="empty">No trades today</div>';
+    return;
+  }
+
+  let totalPnl = 0;
+  let html = '';
+
+  for (const t of trades) {
+    const pnl = t.pnl_per_lot;
+    const hasPnl = pnl != null;
+    const pnlColor = hasPnl ? (pnl >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-muted)';
+    const statusPill = t.status === 'CLOSED' ? pill('CLOSED', hasPnl && pnl >= 0 ? 'green' : 'red') : pill('OPEN', 'yellow');
+    if (hasPnl) totalPnl += pnl;
+
+    html += `
+      <div class="trade-row">
+        <div class="trade-row-header">
+          <span class="trade-row-strike">${t.strike || ''} ${t.option_type || ''} x${t.lots || ''}</span>
+          <span class="trade-row-pnl" style="color:${pnlColor}">${hasPnl ? (pnl >= 0 ? '+' : '') + fmt(pnl) : '--'}</span>
+        </div>
+        <div class="trade-row-meta">
+          ${t.instrument || ''} | Entry: ${t.entry_price || '--'} @ ${t.entry_time || '--'}
+          ${t.exit_price ? ' | Exit: ' + t.exit_price + ' @ ' + t.exit_time : ''}
+          ${t.notes ? ' | ' + t.notes : ''}
+        </div>
+      </div>`;
+  }
+
+  const totalColor = totalPnl >= 0 ? 'var(--green)' : 'var(--red)';
+  const summaryHtml = `
+    <div class="card" style="margin-bottom:10px">
+      <div class="card-header">
+        <span class="card-title">Today's P&L</span>
+        <span style="font-size:18px;font-weight:800;color:${totalColor}">${totalPnl >= 0 ? '+' : ''}${fmt(totalPnl)}</span>
+      </div>
+    </div>`;
+
+  document.getElementById('trades-content').innerHTML = summaryHtml + '<div class="card">' + html + '</div>';
+}
+
+// ── Actions ───────────────────────────────────────────────────
+async function doExit() {
+  if (!confirm(`Exit ${INSTRUMENT} trade?`)) return;
+  const ltp = lastState && lastState.htl && lastState.htl.price ? lastState.htl.price.ltp : null;
+  await apiExit({ instrument: INSTRUMENT, exit_price: ltp, notes: 'Mobile exit' });
+  poll();
+}
+
+// ── Navigation ────────────────────────────────────────────────
+function switchView(view) {
+  currentView = view;
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('view-' + view).classList.add('active');
+  document.getElementById('nav-' + view).classList.add('active');
+
+  if (view === 'signals') fetchSignals().then(renderSignals);
+  if (view === 'trades') fetchHistory().then(renderTrades);
+}
+
+function switchInstrument(inst) {
+  INSTRUMENT = inst;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + inst).classList.add('active');
+  prevSpot = null;
+  poll();
+  if (currentView === 'signals') fetchSignals().then(renderSignals);
+}
+
+// ── Audio Alerts ─────────────────────────────────────────────
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let audioEnabled = localStorage.getItem('wr_audio') === '1';
+
+function beep(freq, duration, repeat) {
+  if (!audioEnabled) return;
+  for (let i = 0; i < (repeat || 1); i++) {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.frequency.value = freq;
+    gain.gain.value = 0.3;
+    const start = audioCtx.currentTime + i * (duration / 1000 + 0.1);
+    osc.start(start);
+    osc.stop(start + duration / 1000);
+  }
+}
+
+// Alert types
+function alertRadar()     { beep(880, 150, 2); }   // two short high beeps
+function alertTakeTrade() { beep(1100, 200, 3); }   // three urgent beeps
+function alertHTL()       { beep(440, 300, 1); }     // one low tone
+function alertRegime()    { beep(660, 150, 1); }     // one mid beep
+
+function updateBellUI() {
+  const bell = document.getElementById('notifBell');
+  if (audioEnabled) {
+    bell.style.opacity = '1';
+    bell.innerHTML = '&#128266;';
+    bell.title = 'Audio alerts ON (tap to disable)';
+  } else {
+    bell.style.opacity = '0.4';
+    bell.innerHTML = '&#128264;';
+    bell.title = 'Enable audio alerts';
+  }
+}
+
+function toggleAudio() {
+  // iOS requires user gesture to unlock AudioContext
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  audioEnabled = !audioEnabled;
+  localStorage.setItem('wr_audio', audioEnabled ? '1' : '0');
+  if (audioEnabled) beep(880, 100, 1);  // confirmation beep
+  updateBellUI();
+}
+
+function checkAlerts(s) {
+  if (!audioEnabled || !s) return;
+  const sniper = s.sniper || {};
+  const htl = s.htl || {};
+  const prev = prevNotifState;
+
+  // 1. Sniper TAKE TRADE / SEND IT
+  const action = (sniper.action || '').toUpperCase();
+  const prevAction = (prev.sniperAction || '').toUpperCase();
+  if ((action.includes('TAKE TRADE') && !prevAction.includes('TAKE TRADE')) ||
+      (action.includes('SEND IT') && !prevAction.includes('SEND IT'))) {
+    alertTakeTrade();
+  }
+
+  // 2. HTL verdict change
+  const verdict = (htl.verdict || '').toUpperCase();
+  const prevVerdict = (prev.htlVerdict || '').toUpperCase();
+  if (verdict && prevVerdict && verdict !== prevVerdict) {
+    alertHTL();
+  }
+
+  // 3. Regime change
+  const regime = (s.regime || '').toUpperCase();
+  const prevRegime = (prev.regime || '').toUpperCase();
+  if (regime && prevRegime && regime !== prevRegime) {
+    alertRegime();
+  }
+
+  // 4. Radar setup forming
+  const radarActive = s.radar && s.radar.active;
+  const prevRadar = prev.radarActive || false;
+  if (radarActive && !prevRadar) {
+    alertRadar();
+  }
+
+  // Save current state for next comparison
+  prevNotifState = {
+    sniperAction: sniper.action || '',
+    htlVerdict: htl.verdict || '',
+    regime: s.regime || '',
+    radarActive: radarActive,
+  };
+}
+
+// Init bell state
+updateBellUI();
+
+// ── Polling ───────────────────────────────────────────────────
+async function poll() {
+  const state = await fetchState();
+  const dot = document.getElementById('statusDot');
+
+  if (state && state.spot) {
+    checkAlerts(state);
+    lastState = state;
+    dot.className = 'status-dot live';
+    renderDashboard(state);
+  } else if (lastState) {
+    dot.className = 'status-dot stale';
+  } else {
+    dot.className = 'status-dot offline';
+  }
+}
+
+// Start polling
+poll();
+pollTimer = setInterval(poll, 10000);
+
+// Refresh signals/trades when visible
+setInterval(() => {
+  if (currentView === 'signals') fetchSignals().then(renderSignals);
+  if (currentView === 'trades') fetchHistory().then(renderTrades);
+}, 30000);
+</script>
+</body>
+</html>
