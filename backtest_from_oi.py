@@ -415,6 +415,9 @@ def run_one_day(options_path, min_pts=25):
             "trend": trend, "move_prob": move_prob.get("probability", 0),
             "gamma": gamma, "gamma_mom": gamma_mom,
             "structural_fired": structural_fired,
+            "straddle": straddle,
+            "mom_5m": mom_5m,
+            "mom_15m": mom_15m,
         })
 
         prev_spot = spot

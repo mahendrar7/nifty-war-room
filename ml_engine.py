@@ -153,7 +153,8 @@ class Resampler:
         Drops first/last candles of each session which are nearly always
         incomplete and produce misleading range/momentum features.
         """
-        MIN_MINUTES_IN_CANDLE = 10   # require at least 10 of 15 minutes
+        candle_size = int(self.freq.replace("min", "").replace("T", ""))
+        MIN_MINUTES_IN_CANDLE = max(2, int(candle_size * 0.66))  # require ~2/3 of candle
 
         df = raw_df.copy()
         df = df.sort_values("timestamp")
