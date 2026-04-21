@@ -243,6 +243,15 @@ from heavyweight_momentum import (
 )
 from price_tracker import PriceTracker, resolve_option_symbol
 from radar import radar_scan
+from gamma_engine import compute_strike_thetas, compute_atm_theta_metrics
+from theta_buyer import (
+    compute_buyer_theta_context,
+    format_dashboard_lines as theta_dashboard_lines,
+    format_trade_log_line  as theta_trade_log_line,
+    log_theta_to_trade,
+    THETA_BUYER_CSV_HEADERS,
+    theta_log_row,
+)
 
 init(autoreset=True)
 
@@ -350,6 +359,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
 
     # ── Compute all signals ────────────────────────────────────────────────
     df = compute_strike_gammas(df, spot, expiry)
+    df = compute_strike_thetas(df, spot, expiry)   # requires IVs from gammas above
     call_wall, put_wall = compute_oi_walls(df)
 
     # FIX: track wall history for retreat detection
@@ -358,6 +368,16 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
 
     straddle = compute_straddle(df, atm)
     momentum_data = update_straddle(straddle)
+
+    # ── Buyer theta context — computed once per tick, used everywhere below ─
+    theta_ctx = compute_buyer_theta_context(
+        df=df, atm=atm, spot=spot, straddle=straddle,
+        expiry=expiry, momentum_data=momentum_data,
+        days_to_expiry=(expiry - datetime.now().date()).days,
+        spot_history=list(state.spot_history),
+        active_trade=state.active_trade,
+        lot_size=PROFILE["lot_size"],
+    )
     gamma = compute_gamma_pressure(df, spot, expiry, lot_size=PROFILE["lot_size"], sigma=PROFILE["gamma_sigma"])
     gamma_flip = detect_gamma_flip(gamma, state.previous_gamma)
     gamma_wall = compute_gamma_wall(df, spot, expiry, lot_size=PROFILE["lot_size"], sigma=PROFILE["gamma_sigma"])
@@ -656,6 +676,9 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     else:
         print(f"Straddle:{round(straddle, 1)}  ±{round(straddle / 2, 1)}")
 
+    # Row 3b: Theta buyer lines — always shown, buyer-specific action signals
+    print(theta_dashboard_lines(theta_ctx))
+
     # Row 4: Bias / Regime
     if bypassed:
         tracker_tag = f"  {Fore.LIGHTCYAN_EX}[⚡ structural bypass]{Style.RESET_ALL}"
@@ -909,6 +932,10 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
             print(Fore.CYAN + f"   {pt_tag}" + Style.RESET_ALL)
         if hw_tag:
             print(Fore.CYAN + f"   {hw_tag}" + Style.RESET_ALL)
+        # Theta race line — is the move outrunning decay?
+        theta_line = theta_trade_log_line(theta_ctx, state.active_trade)
+        if theta_line:
+            print(theta_line)
         print(f"   Active: {at['strike']} {at['option_type']} "
               f"@ ₹{at['entry_price']:.0f}  entered {at.get('entry_time', '?')}")
 
@@ -1208,6 +1235,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         ml_signal=ml_signal,
         ml_confidence=_ml_conf,
         days_to_expiry=days_to_expiry,
+        theta_ctx=theta_ctx,
     )
 
     # ── Write snapshot JSON for Telegram bot ──────────────────────────────
@@ -1226,7 +1254,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         radar=radar_result,
     )
 
-    return gamma, straddle, bias, trap_prob, count
+    return gamma, straddle, bias, trap_prob, count, theta_ctx
 
 
 # =============================================================================
@@ -1454,10 +1482,12 @@ def save_signals(spot, atm, gamma, straddle, bias, confidence, regime, action,
                  sniper_action, sniper_dir, sniper_score, sniper_setup, sniper_confidence,
                  trade_strike, trade_type, trade_dir,
                  htl_verdict, htl_score, htl_source,
-                 ml_signal, ml_confidence, days_to_expiry):
+                 ml_signal, ml_confidence, days_to_expiry,
+                 theta_ctx=None):
     """
     Append one row of derived signals to the daily signals log.
     Separate from the raw options CSV — this is for post-session analysis.
+    theta_ctx: optional ThetaBuyerContext dict — appends theta columns when provided.
     """
     global _SIGNALS_CSV
     now = datetime.now()
@@ -1467,6 +1497,9 @@ def save_signals(spot, atm, gamma, straddle, bias, confidence, regime, action,
         _SIGNALS_CSV = f"data/signals_log_{_instrument_arg.lower()}_{date_str}.csv"
 
     file_exists = os.path.exists(_SIGNALS_CSV)
+
+    theta_headers = THETA_BUYER_CSV_HEADERS if theta_ctx is not None else []
+    theta_values  = theta_log_row(theta_ctx) if theta_ctx is not None else []
 
     with open(_SIGNALS_CSV, "a", newline="") as f:
         writer = csv.writer(f)
@@ -1487,6 +1520,7 @@ def save_signals(spot, atm, gamma, straddle, bias, confidence, regime, action,
                 "trade_strike", "trade_type", "trade_dir",
                 "htl_verdict", "htl_score", "htl_source",
                 "ml_signal", "ml_confidence", "days_to_expiry",
+                *theta_headers,
             ])
         writer.writerow([
             now.strftime("%H:%M:%S"), spot, atm, int(gamma), round(straddle, 1),
@@ -1504,13 +1538,15 @@ def save_signals(spot, atm, gamma, straddle, bias, confidence, regime, action,
             trade_strike or "", trade_type or "", trade_dir or "",
             htl_verdict or "", htl_score or "", htl_source or "",
             ml_signal, ml_confidence or "", days_to_expiry,
+            *theta_values,
         ])
 
 
 # =============================================================================
 # CSV LOGGER
 # =============================================================================
-def save_rows(rows, spot, atm, expiry, gamma, straddle, bias, trap_prob, counter):
+def save_rows(rows, spot, atm, expiry, gamma, straddle, bias, trap_prob, counter,
+              theta_pct=0.0, atm_iv=0.0):
     now = datetime.now().replace(second=0, microsecond=0)
     days_to_exp = (expiry - datetime.now().date()).days
     file_exists = os.path.exists(CSV_FILE)
@@ -1522,7 +1558,8 @@ def save_rows(rows, spot, atm, expiry, gamma, straddle, bias, trap_prob, counter
                 "timestamp", "symbol", "spot", "atm_strike", "strike",
                 "option_type", "ltp", "oi", "volume", "expiry",
                 "days_to_expiry", "gamma_pressure", "straddle",
-                "market_bias", "trap_probability", "breakout_cycles"
+                "market_bias", "trap_probability", "breakout_cycles",
+                "theta_pct", "atm_iv",
             ])
         for r in rows:
             sym = r["symbol"]
@@ -1531,7 +1568,8 @@ def save_rows(rows, spot, atm, expiry, gamma, straddle, bias, trap_prob, counter
             writer.writerow([
                 now, sym, spot, atm, strike, opt_type,
                 r["ltp"], r["oi"], r["volume"], expiry, days_to_exp,
-                gamma, straddle, bias, trap_prob, counter
+                gamma, straddle, bias, trap_prob, counter,
+                round(theta_pct, 2), round(atm_iv, 2),
             ])
 
 
@@ -1732,14 +1770,16 @@ def run_logger():
             )
             hw_stall = detect_hw_stall(state.hw_history) if in_trade else None
 
-            gamma, straddle, bias, trap_prob, counter = print_dashboard(
+            gamma, straddle, bias, trap_prob, counter, theta_ctx = print_dashboard(
                 df, spot, atm, momentum_strikes, expiry,
                 hw_momentum=hw_momentum, hw_roc_trend=hw_roc_trend,
                 hw_stall=hw_stall,
             )
 
             state.previous_snapshot = df.copy()
-            save_rows(rows, spot, atm, expiry, gamma, straddle, bias, trap_prob, counter)
+            save_rows(rows, spot, atm, expiry, gamma, straddle, bias, trap_prob, counter,
+                      theta_pct=theta_ctx["theta_pct"] if theta_ctx else 0.0,
+                      atm_iv=theta_ctx["atm_iv"] if theta_ctx else 0.0)
 
             if ml is not None:
                 minutes_since_open = (now.hour * 60 + now.minute) - (9 * 60 + 15)
@@ -1750,6 +1790,8 @@ def run_logger():
                     breakout_cycles=counter, bias=bias,
                     minutes_since_open=minutes_since_open,
                     days_to_expiry=days_to_expiry,
+                    theta_pct=theta_ctx["theta_pct"] if theta_ctx else 0.0,
+                    atm_iv=theta_ctx["atm_iv"]       if theta_ctx else 0.0,
                 )
 
                 if isinstance(ml_result, dict) and "resolved" in ml_result:

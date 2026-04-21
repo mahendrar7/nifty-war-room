@@ -141,21 +141,29 @@ def detect_persistent_trend(spot, expected_move):
 # EXPIRY THETA NORMALISATION
 # =============================================================================
 
-def normalise_straddle_momentum_for_theta(straddle_momentum, days_to_expiry):
+def normalise_straddle_momentum_for_theta(straddle_momentum, days_to_expiry,
+                                           theta_per_5m_rs=None,
+                                           straddle_price=None):
     """
-    On expiry days, straddle decays naturally through theta.
-    Raw momentum of -3% might just be normal decay, not IV compression.
-    Subtract expected theta decay so only *excess* compression is counted.
+    Subtract expected theta decay from straddle momentum so only excess
+    compression (real IV collapse) is counted.
 
-    Returns adjusted momentum (less negative on expiry days).
+    theta_per_5m_rs : ₹/5m from compute_atm_theta_metrics — dynamic, preferred.
+    straddle_price  : needed to convert ₹ → % (required if theta_per_5m_rs given).
+    Falls back to config constant if theta not yet computed.
     """
     from config import EXPIRY_THETA_NORM_DTE, THETA_DECAY_RATE_PER_5M
     if straddle_momentum is None:
         return straddle_momentum
+
+    # Dynamic path — real computed theta rate
+    if theta_per_5m_rs is not None and straddle_price and straddle_price > 0:
+        expected_pct_per_5m = -(theta_per_5m_rs / straddle_price * 100)
+        return straddle_momentum - expected_pct_per_5m
+
+    # Static fallback
     if days_to_expiry not in EXPIRY_THETA_NORM_DTE:
         return straddle_momentum
-    # Subtract expected decay — if expected is -1.5% and actual is -3%,
-    # the excess compression is only -1.5%
     return straddle_momentum - THETA_DECAY_RATE_PER_5M
 
 

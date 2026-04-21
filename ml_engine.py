@@ -61,7 +61,8 @@ class Resampler:
     REQUIRED_COLS = ["timestamp","symbol","spot","atm_strike","strike",
                      "option_type","ltp","oi","volume","expiry","days_to_expiry"]
     OPTIONAL_COLS = {"gamma_pressure":0.0,"straddle":0.0,"market_bias":"RANGE",
-                     "trap_probability":0,"breakout_cycles":0}
+                     "trap_probability":0,"breakout_cycles":0,
+                     "theta_pct":0.0,"atm_iv":0.0}
 
     def load_csv(self, path_or_paths):
         """
@@ -266,6 +267,10 @@ class Resampler:
             minutes_since_open = (ts.hour * 60 + ts.minute) - (9 * 60 + 15)
             days_to_expiry     = group["days_to_expiry"].iloc[-1] if "days_to_expiry" in group else 0
 
+            # ── Theta features (close value — decay rate doesn't flow) ─────────
+            theta_pct_close = last["theta_pct"].mean() if "theta_pct" in last.columns else 0.0
+            atm_iv_close    = last["atm_iv"].mean()    if "atm_iv"    in last.columns else 0.0
+
             return {
                 "timestamp":          ts,
                 # Price
@@ -305,6 +310,9 @@ class Resampler:
                 # Time
                 "minutes_since_open": minutes_since_open,
                 "days_to_expiry":     days_to_expiry,
+                # Theta — buyer cost of carry context
+                "theta_pct":          round(theta_pct_close, 2),
+                "atm_iv":             round(atm_iv_close, 2),
             }
 
         except Exception as e:
@@ -708,10 +716,12 @@ class MLEngine:
                                spot, atm, gamma, straddle,
                                trap_prob, breakout_cycles,
                                bias, minutes_since_open, days_to_expiry,
-                               prev_gamma=None, prev_straddle=None):
+                               prev_gamma=None, prev_straddle=None,
+                               theta_pct=0.0, atm_iv=0.0):
         """
         Convenience method — pass your war room computed values directly
         and get back a feature dict ready for predict_latest().
+        theta_pct, atm_iv: from theta_ctx["theta_pct"] / theta_ctx["atm_iv"]
         """
         from ml_engine import Resampler  # avoid circular if used standalone
 
@@ -761,6 +771,8 @@ class MLEngine:
             "bias_encoded":       bias_map.get(bias, 0),
             "minutes_since_open": minutes_since_open,
             "days_to_expiry":     days_to_expiry,
+            "theta_pct":          round(theta_pct, 2),
+            "atm_iv":             round(atm_iv, 2),
         }
 
     # ── Rolling retrain — call this once per day before market open ───────────
@@ -1095,10 +1107,12 @@ class MLSignal:
 
     def on_tick(self, df, spot, atm, gamma, straddle,
                 trap_prob, breakout_cycles, bias,
-                minutes_since_open, days_to_expiry):
+                minutes_since_open, days_to_expiry,
+                theta_pct=0.0, atm_iv=0.0):
         """
         Call this every minute from run_logger().
         Returns a prediction dict at 15-minute boundaries, None otherwise.
+        theta_pct, atm_iv: from theta_ctx — passed through to extract_live_features.
         """
         if not self.ready:
             return None
@@ -1128,6 +1142,8 @@ class MLSignal:
                 days_to_expiry    = days_to_expiry,
                 prev_gamma        = self.prev_gamma,
                 prev_straddle     = self.prev_straddle,
+                theta_pct         = theta_pct,
+                atm_iv            = atm_iv,
             )
 
             # Use dynamic threshold — adjusts based on recent form
