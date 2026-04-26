@@ -19,7 +19,9 @@ Auth:
 import csv
 import json
 import os
-from datetime import datetime
+import threading
+import time
+from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import Flask, jsonify, render_template_string, request, Response
@@ -816,6 +818,17 @@ def mobile():
 # =============================================================================
 # MAIN
 # =============================================================================
+def _shutdown_at_market_close():
+    """Exit the process at 15:30 — war room is done, no need to keep UI up."""
+    now = datetime.now()
+    close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    if now >= close:
+        return  # already past close, don't block startup
+    time.sleep((close - now).total_seconds())
+    print("Market closed. Shutting down trade logger.")
+    os._exit(0)
+
+
 if __name__ == "__main__":
     os.makedirs(DATA_DIR, exist_ok=True)
     print("Trade Logger → http://localhost:5050")
@@ -823,4 +836,5 @@ if __name__ == "__main__":
         print(f"🔒 Auth enabled (user: {AUTH_USER})")
     else:
         print("⚠  No auth — set TRADE_LOGGER_USER & TRADE_LOGGER_PASS for ngrok use")
+    threading.Thread(target=_shutdown_at_market_close, daemon=True).start()
     app.run(host="0.0.0.0", port=5050, debug=False)

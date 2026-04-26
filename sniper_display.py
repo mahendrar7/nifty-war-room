@@ -1086,3 +1086,44 @@ def sniper_display(
         "radar": radar_tag,
         "radar_adj": radar_adj,
     }
+
+
+# ── Sniper interface wrappers ─────────────────────────────────────────────────
+
+class NiftySniper:
+    """Thin wrapper around sniper_display() so NIFTY uses the same interface."""
+
+    def compute(self, spot, bias, confidence, gamma, straddle,
+                momentum_data, move_prob, trap, velocity,
+                vacuum, wall_break_vac, flip_breakout, liq_accel,
+                squeeze, trend, call_wall, put_wall, flip_level, regime,
+                days_to_expiry, call_oi_speed=None, put_oi_speed=None,
+                gamma_shift=None, gamma_history=None, spot_history=None,
+                profile=None, radar_result=None, debug=False, **kwargs):
+        return sniper_display(
+            spot=spot, bias=bias, confidence=confidence,
+            gamma=gamma, straddle=straddle, momentum_data=momentum_data,
+            move_prob=move_prob, trap=trap, velocity=velocity,
+            vacuum=vacuum, wall_break_vac=wall_break_vac,
+            flip_breakout=flip_breakout, liq_accel=liq_accel,
+            squeeze=squeeze, trend=trend,
+            call_wall=call_wall, put_wall=put_wall,
+            flip_level=flip_level, regime=regime,
+            trade=None, days_to_expiry=days_to_expiry,
+            call_oi_speed=call_oi_speed, put_oi_speed=put_oi_speed,
+            gamma_shift=gamma_shift, notify_fn=None, debug=debug,
+            gamma_history=gamma_history, spot_history=spot_history,
+            profile=profile, radar_result=radar_result,
+        )
+
+
+def create_sniper(instrument: str):
+    """
+    Factory — returns the correct sniper for the instrument.
+      "SENSEX" → CoilSniper  (pre-move coil detection)
+      "NIFTY"  → NiftySniper (existing score-based sniper)
+    """
+    from coil_sniper import CoilSniper
+    if instrument.upper() == "SENSEX":
+        return CoilSniper()
+    return NiftySniper()

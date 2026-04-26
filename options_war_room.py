@@ -142,7 +142,7 @@ from datetime import datetime, timedelta
 
 from colorama import Fore, Style, init
 from notifier import send_telegram_message
-from sniper_display import sniper_display, sniper_notify
+from sniper_display import sniper_notify, create_sniper
 
 # =============================================================================
 # AUTO-CAFFEINATE — prevent macOS sleep while war room is running
@@ -205,6 +205,7 @@ CSV_FILE              = PROFILE["csv_file"]
 LOT_SIZE              = PROFILE["lot_size"]
 GAMMA_FLIP_DANGER_ZONE = PROFILE["gamma_flip_danger_zone"]
 print(f"▶ Running for {_instrument_arg}")
+_sniper = create_sniper(_instrument_arg)
 from state import state, restore_state_from_csv
 from market_data import (
     load_instruments, get_spot, get_nearest_expiry,
@@ -998,7 +999,9 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         print(f"📡 RADAR: {Fore.WHITE}quiet — no setup{Style.RESET_ALL}")
 
     # SNIPER — decides WHETHER to trade and DIRECTION
-    sniper_result = sniper_display(
+    # NiftySniper: score-based (existing logic)
+    # CoilSniper:  pre-move coil detection (SENSEX)
+    sniper_result = _sniper.compute(
         spot=spot, bias=bias, confidence=confidence,
         gamma=gamma, straddle=straddle, momentum_data=momentum_data,
         move_prob=move_prob, trap=trap, velocity=velocity,
@@ -1007,13 +1010,13 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         squeeze=squeeze, trend=trend,
         call_wall=call_wall, put_wall=put_wall,
         flip_level=flip_level, regime=regime,
-        trade=None, days_to_expiry=days_to_expiry,
+        days_to_expiry=days_to_expiry,
         call_oi_speed=call_oi_speed, put_oi_speed=put_oi_speed,
-        gamma_shift=gamma_shift, notify_fn=None, debug=DEBUG_MODE,
+        gamma_shift=gamma_shift, debug=DEBUG_MODE,
         gamma_history=list(state.gamma_history),
         spot_history=list(state.spot_history),
-        profile=PROFILE,
-        radar_result=radar_result,
+        profile=PROFILE, radar_result=radar_result,
+        pcr_val=pcr_val, now=datetime.now(),
     )
 
     # TRADE SUGGESTION — only when sniper endorses
@@ -1728,9 +1731,8 @@ def run_logger():
             except Exception as e:
                 print(f"⚠ Daily backtest report failed: {e}")
 
-            print("State reset. Waiting for next market open...")
-            time.sleep(60)
-            continue
+            print("Session wrapped. Shutting down.")
+            return
 
         if now.time() < MARKET_OPEN:
             archived_today = False
