@@ -3,12 +3,16 @@ position_sizing.py — Trade logic, regime interpretation, position sizing.
 interpret_market, suggest_trade, compute_position_size, choose_otm_strike.
 """
 
+import math
+
 from config import (
     REGIME_RISK, BASE_RISK_PCT, OPTION_STOP_PCT,
     EXPIRY_STOP_PCT, EXPIRY_LOT_CAP, EXPIRY_RISK_SCALAR,
-    MIN_OTM_PCT, MAX_OTM_PCT, MAX_CAPITAL_PCT,
-    ACCOUNT_SIZE, LOT_SIZE, STRIKE_STEP,
+    MAX_CAPITAL_PCT, ACCOUNT_SIZE, LOT_SIZE, STRIKE_STEP,
 )
+
+# N^{-1}(0.30) ≈ -0.5244 — distance in sigma units for 0.3-delta strike
+_NORM_INV_030 = 0.5244
 
 
 # =============================================================================
@@ -105,8 +109,12 @@ def interpret_market(spot, atm, bias, confidence, gamma, gamma_flip,
 # =============================================================================
 
 def choose_otm_strike(spot, expected_move, direction, gamma, flip_level, regime):
-    base_pct = (MIN_OTM_PCT + MAX_OTM_PCT) / 2
-    distance = expected_move * base_pct
+    # Derive implied vol proxy from straddle (straddle ≈ 0.8 × spot × σ√T)
+    # expected_move = straddle / 2  →  σ√T = 2×expected_move / (0.8×spot)
+    sigma_sqrt_t = (2 * expected_move) / (0.8 * spot)
+
+    # 0.3-delta strike: K = S × exp(N^{-1}(0.3) × σ√T) = S × exp(0.5244 × σ√T)
+    distance = spot * (math.exp(_NORM_INV_030 * sigma_sqrt_t) - 1)
 
     if gamma < 0:
         distance *= 1.15
