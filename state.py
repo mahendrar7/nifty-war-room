@@ -128,6 +128,7 @@ class MarketState:
         self.spot_history        = deque(maxlen=60)  # last 60 minutes
         self.session_high        = None              # intraday high
         self.session_low         = None              # intraday low
+        self.session_open_spot   = None              # first spot of the day
 
         # NEW: gamma history for momentum / rate-of-change tracking
         self.gamma_history       = deque(maxlen=10)  # last 10 candles
@@ -174,6 +175,7 @@ class MarketState:
         self.spot_history.clear()
         self.session_high        = None
         self.session_low         = None
+        self.session_open_spot   = None
         self.hw_history.clear()
         self.throttle_cache.clear()
         self.tick_counter        = 0

@@ -408,7 +408,9 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     prev_spot = state.previous_spot
     # Track spot history for trend detection
     state.spot_history.append(spot)
-    # Track session high/low
+    # Track session high/low and day open
+    if state.session_open_spot is None:
+        state.session_open_spot = spot
     if state.session_high is None or spot > state.session_high:
         state.session_high = spot
     if state.session_low is None or spot < state.session_low:
@@ -1017,6 +1019,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         spot_history=list(state.spot_history),
         profile=PROFILE, radar_result=radar_result,
         pcr_val=pcr_val, now=datetime.now(),
+        day_open_spot=state.session_open_spot,
     )
 
     # TRADE SUGGESTION — only when sniper endorses

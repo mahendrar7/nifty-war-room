@@ -42,9 +42,13 @@ class CoilSniper:
 
     # ── public interface ──────────────────────────────────────────────────────
 
+    # SHORT signals are suppressed when day_move is 0–200 pts (11–23% win rate historically)
+    SHORT_GATE_DAY_MOVE_LO = 0
+    SHORT_GATE_DAY_MOVE_HI = 200
+
     def compute(self, straddle, momentum_data, move_prob,
                 call_oi_speed, put_oi_speed, liq_accel, squeeze,
-                pcr_val, velocity, now=None, **kwargs):
+                pcr_val, velocity, now=None, day_open_spot=None, **kwargs):
         """
         Called every tick.  Returns sniper-compatible dict:
           action      : "TAKE TRADE" | "STALK — WAIT FOR TRIGGER" | ""
@@ -103,7 +107,20 @@ class CoilSniper:
             now - self.last_alert_time < timedelta(minutes=COOLDOWN_MIN)
         )
 
-        if score >= SCORE_THRESHOLD and not in_cooldown:
+        direction  = "LONG" if move_dir == "UP" else "SHORT"
+
+        # Day-move gate: SHORT signals on up-trending days (0–200 pts from open) have
+        # only 11–23% win rate historically — suppress before cooldown is consumed.
+        day_move_gate_blocked = False
+        if direction == "SHORT" and day_open_spot is not None:
+            spot_now = _safe_float(kwargs.get("spot", 0))
+            day_move = spot_now - day_open_spot
+            if self.SHORT_GATE_DAY_MOVE_LO <= day_move < self.SHORT_GATE_DAY_MOVE_HI:
+                day_move_gate_blocked = True
+
+        if day_move_gate_blocked:
+            action = ""
+        elif score >= SCORE_THRESHOLD and not in_cooldown:
             action    = "TAKE TRADE"
             self.last_alert_time = now
         elif score >= (SCORE_THRESHOLD - 1.0):
@@ -111,9 +128,10 @@ class CoilSniper:
         else:
             action = ""
 
-        direction  = "LONG" if move_dir == "UP" else "SHORT"
         confidence = "HIGH" if score >= 6.5 else ("MEDIUM" if score >= SCORE_THRESHOLD else "LOW")
         setup      = self._setup_label(breakdown)
+        if day_move_gate_blocked:
+            setup += "[gate:day↑]"
 
         self._print_box(score, direction, confidence, action, breakdown, in_cooldown)
 
