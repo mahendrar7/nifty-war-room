@@ -1182,13 +1182,16 @@ class MLSignal:
 if __name__ == "__main__":
     import sys
 
+    # Usage: ml_engine.py [cmd] [instrument] [days]
+    #   cmd        : retrain | feedback | suggest | train (default)
+    #   instrument : nifty | sensex (default: nifty)
+    #   days       : lookback days for retrain (default: 30)
+    cmd        = sys.argv[1] if len(sys.argv) > 1 else "train"
     instrument = sys.argv[2] if len(sys.argv) > 2 else "nifty"
-    engine = MLEngine(instrument=instrument)
-
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "train"
+    engine     = MLEngine(instrument=instrument)
 
     if cmd == "retrain":
-        days = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+        days = int(sys.argv[3]) if len(sys.argv) > 3 else 30
         engine.rolling_retrain(lookback_days=days)
 
     elif cmd == "feedback":
