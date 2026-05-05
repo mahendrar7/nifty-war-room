@@ -1718,7 +1718,8 @@ def run_logger():
                     print("🔄 Retraining ML model...")
                     ml.engine.rolling_retrain(lookback_days=30)
                     ml.ready = True
-                    print("✅ ML retrained")
+                    state.ml_consecutive_wrong = 0
+                    print("✅ ML retrained — kill switch reset")
                 except Exception as e:
                     print(f"⚠ ML retrain failed: {e}")
 
