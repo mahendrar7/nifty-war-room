@@ -15,6 +15,7 @@ Usage:
 import os
 import sys
 import glob
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -30,7 +31,10 @@ from ml_engine import (
 def load_all_days(instrument="nifty", candle_minutes=15):
     """Load all archived 1-min CSVs, resample to N-min candles per day."""
     pattern = f"data/options_log_1min_{instrument}_????????.csv"
-    files = sorted(glob.glob(pattern))
+    files = sorted(glob.glob(pattern),
+                   key=lambda f: datetime.strptime(
+                       os.path.basename(f).split("_")[-1].replace(".csv", ""),
+                       "%d%m%Y"))
     if not files:
         print(f"No files found matching {pattern}")
         sys.exit(1)
@@ -130,21 +134,22 @@ def predict_day(model, feature_cols, x_points, test_candles, instrument="nifty")
     return results
 
 
+LOT_SIZES = {"nifty": 65, "sensex": 20}
+
+
 def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
                      delta=0.3, lot_size=65, num_lots=2,
                      stop_pts=15, target_pts=25, slippage_pts=2,
-                     hold_minutes=45, min_conf=0.55):
+                     hold_minutes=45, min_conf=0.55, runner=False,
+                     runner_ext=1.3, runner_be=False, direction_filter=None,
+                     long_conf=None, retracement_pct=None):
     """
     Strict fixed SL/TP simulation on option value.
 
-    - Entry: buy option at market when signal fires
-    - SL: option drops stop_pts from entry → exit
-    - TP: option gains target_pts from entry → exit
-    - TIME: exit at hold_minutes if neither hit
-    - No trailing, no scale-out, no breakeven moves.
-
-    Option move estimated as: nifty_move * delta
-    So SL in nifty terms = stop_pts / delta, TP = target_pts / delta
+    runner=True: two-lot mode.
+      Lot 1 exits at TP. Lot 2 rides with TP as trailing floor, exits at
+      TP*1.3 (extended target) or when price drops back to TP, whichever first.
+      Both lots share the same SL.
     """
     max_candles = max(2, hold_minutes // candle_minutes)
     qty = lot_size * num_lots
@@ -159,27 +164,41 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
         if pred["signal"] == 0:
             continue
 
-        # Confidence filter
-        if pred["confidence"] < min_conf:
+        direction = "LONG" if pred["signal"] == 1 else "SHORT"
+        threshold = long_conf if (long_conf is not None and direction == "LONG") else min_conf
+        if pred["confidence"] < threshold:
             continue
 
-        # No trades after cutoff (e.g. 15:15) — avoid EOD chop
         ts = pred["timestamp"]
         if hasattr(ts, 'hour'):
             if ts.hour > 15 or (ts.hour == 15 and ts.minute >= 15):
                 continue
+            if ts.hour == 9 and ts.minute < 30:
+                continue
 
-        direction = "LONG" if pred["signal"] == 1 else "SHORT"
+        if direction_filter and direction != direction_filter:
+            continue
         entry_spot = pred["spot"]
 
-        nifty_stop = stop_pts / delta     # ~50 pts nifty
-        nifty_target = target_pts / delta  # ~83 pts nifty
+        nifty_stop = stop_pts / delta
+        nifty_target = target_pts / delta
+        lot2_target_pts = round(target_pts * runner_ext, 1)
+        lot2_nifty_target = lot2_target_pts / delta
 
         future = predictions[i + 1:]
         candles_held = 0
         exit_reason = ""
         option_pnl = 0.0
         peak_move = 0.0
+        worst_move = 0.0
+
+        # Runner-mode per-lot tracking
+        lot1_pnl = None
+        lot2_pnl = None
+        lot1_exit = None
+        lot2_exit = None
+        lot1_tp_candle = -1
+        lot2_peak = 0.0  # tracks peak spot move after lot1 exits (for retracement trail)
 
         for j, fp in enumerate(future):
             candles_held = j + 1
@@ -189,35 +208,112 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
 
             if move > peak_move:
                 peak_move = move
+            if move < worst_move:
+                worst_move = move
 
-            # Strict SL
-            if move <= -nifty_stop:
-                option_pnl = -stop_pts
-                exit_reason = "SL"
-                break
+            if runner:
+                if lot1_pnl is None:
+                    # Both lots open
+                    if move <= -nifty_stop:
+                        lot1_pnl = lot2_pnl = -stop_pts
+                        lot1_exit = lot2_exit = "SL"
+                        exit_reason = "SL"
+                        break
+                    if move >= nifty_target:
+                        lot1_pnl = target_pts
+                        lot1_exit = "TP"
+                        lot1_tp_candle = j
+                        lot2_peak = move  # seed lot2 peak at TP exit point
+                        # lot 2 continues — don't break
+                    if lot1_pnl is None and candles_held >= max_candles:
+                        opt_val = move * delta
+                        lot1_pnl = lot2_pnl = opt_val
+                        lot1_exit = lot2_exit = "TIME"
+                        exit_reason = "TIME"
+                        break
 
-            # Strict TP
-            if move >= nifty_target:
-                option_pnl = target_pts
-                exit_reason = "TP"
-                break
-
-            # Time limit
-            if candles_held >= max_candles:
-                option_pnl = move * delta
-                exit_reason = "TIME"
-                break
+                if lot1_pnl is not None and lot2_pnl is None and j > lot1_tp_candle:
+                    # Lot 2 running — update peak for trailing stop
+                    if move > lot2_peak:
+                        lot2_peak = move
+                    # Compute floor: retracement trail or fixed TP floor
+                    if retracement_pct and lot2_peak > nifty_target:
+                        # Trail at (1-pct)×peak but never below TP
+                        trail_spot = lot2_peak * (1.0 - retracement_pct)
+                        lot2_floor = max(nifty_target, trail_spot)
+                        lot2_floor_pts = lot2_floor * delta
+                        lot2_floor_label = f"TRAIL{int(retracement_pct*100)}%"
+                    elif runner_be:
+                        lot2_floor = 0
+                        lot2_floor_pts = 0
+                        lot2_floor_label = "BE"
+                    else:
+                        lot2_floor = nifty_target
+                        lot2_floor_pts = target_pts
+                        lot2_floor_label = "TP_TRAIL"
+                    if move <= lot2_floor:
+                        lot2_pnl = lot2_floor_pts
+                        lot2_exit = lot2_floor_label
+                        exit_reason = lot2_floor_label
+                        break
+                    if move >= lot2_nifty_target:
+                        lot2_pnl = lot2_target_pts
+                        lot2_exit = "TP2"
+                        exit_reason = "TP2"
+                        break
+                    if candles_held >= max_candles:
+                        opt_val = move * delta
+                        lot2_pnl = opt_val
+                        lot2_exit = "TIME"
+                        exit_reason = "TIME"
+                        break
+            else:
+                if move <= -nifty_stop:
+                    option_pnl = -stop_pts
+                    exit_reason = "SL"
+                    break
+                if move >= nifty_target:
+                    option_pnl = target_pts
+                    exit_reason = "TP"
+                    break
+                if candles_held >= max_candles:
+                    option_pnl = move * delta
+                    exit_reason = "TIME"
+                    break
         else:
-            # End of data
-            option_pnl = (move if future else 0) * delta
+            opt_val = (move if future else 0) * delta
+            if runner:
+                if lot1_pnl is None:
+                    lot1_pnl = lot2_pnl = opt_val
+                    lot1_exit = lot2_exit = "EOD"
+                else:
+                    lot2_pnl = opt_val
+                    lot2_exit = "EOD"
+                exit_reason = "EOD"
+            else:
+                option_pnl = opt_val
+                exit_reason = "EOD"
+
+        # Edge: lot1 hit TP but loop ended before lot2 found an exit
+        if runner and lot1_pnl is not None and lot2_pnl is None:
+            lot2_pnl = target_pts
+            lot2_exit = "EOD"
             exit_reason = "EOD"
 
-        # Apply slippage (entry + exit)
-        net_pnl = round((option_pnl - slippage_pts) * qty)
+        if runner:
+            qty_per_side = lot_size * max(1, num_lots // 2)
+            net_pnl = (round((lot1_pnl - slippage_pts) * qty_per_side) +
+                       round((lot2_pnl - slippage_pts) * qty_per_side))
+            option_pnl = round((lot1_pnl + lot2_pnl) / 2, 1)
+        else:
+            net_pnl = round((option_pnl - slippage_pts) * qty)
 
         cooldown = max(1, candles_held)
 
-        trades.append({
+        mfe_pts = round(peak_move * delta, 1)
+        mae_pts = round(worst_move * delta, 1)
+
+        trade = {
             "timestamp": pred["timestamp"],
             "direction": direction,
             "entry_spot": entry_spot,
@@ -227,10 +323,108 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
             "option_pnl": round(option_pnl, 1),
             "exit_reason": exit_reason,
             "peak_pts": round(peak_move, 1),
+            "mfe_pts": mfe_pts,
+            "mae_pts": mae_pts,
             "candles_held": candles_held,
-        })
+        }
+        if runner:
+            trade["lot1_pnl"] = round(lot1_pnl, 1)
+            trade["lot2_pnl"] = round(lot2_pnl, 1)
+            trade["lot1_exit"] = lot1_exit
+            trade["lot2_exit"] = lot2_exit
+
+        trades.append(trade)
 
     return trades
+
+
+def _print_summary(instrument, day_results, all_trades, runner):
+    print(f"\n{'='*70}")
+    print(f"  SUMMARY — {instrument.upper()} ML BACKTEST")
+    print(f"{'='*70}")
+
+    if not day_results:
+        print("  No test days produced results.")
+        return
+
+    total_signals = sum(d["signals_fired"] for d in day_results)
+    total_correct = sum(d["signals_correct"] for d in day_results)
+    total_trades = len(all_trades)
+    total_wins = sum(1 for t in all_trades if t["pnl"] > 0)
+    total_pnl = sum(t["pnl"] for t in all_trades)
+    total_tp = sum(1 for t in all_trades if t["exit_reason"] == "TP")
+    total_sl = sum(1 for t in all_trades if t["exit_reason"] == "SL")
+    total_time = sum(1 for t in all_trades if t["exit_reason"] in ("TIME", "EOD"))
+    total_tp2 = sum(1 for t in all_trades if t.get("lot2_exit") == "TP2")
+    total_tp_trail = sum(1 for t in all_trades if t.get("lot2_exit") == "TP_TRAIL")
+    total_trail_pct = sum(1 for t in all_trades if t.get("lot2_exit", "").startswith("TRAIL") and t.get("lot2_exit") != "TP_TRAIL")
+    total_lot1_tp = sum(1 for t in all_trades if t.get("lot1_exit") == "TP")
+
+    # Direction breakdown
+    longs  = [t for t in all_trades if t["direction"] == "LONG"]
+    shorts = [t for t in all_trades if t["direction"] == "SHORT"]
+    long_sl  = sum(1 for t in longs  if t["exit_reason"] == "SL")
+    short_sl = sum(1 for t in shorts if t["exit_reason"] == "SL")
+
+    print(f"\n  {'Date':<12s} {'Signals':>8s} {'Precision':>10s} {'Trades':>7s} {'Wins':>5s} {'P&L':>12s}")
+    print(f"  {'─'*12} {'─'*8} {'─'*10} {'─'*7} {'─'*5} {'─'*12}")
+    for d in day_results:
+        pnl_color = Fore.GREEN if d["pnl"] >= 0 else Fore.RED
+        print(f"  {d['date']:<12s} "
+              f"{d['signals_correct']}/{d['signals_fired']:>3d}     "
+              f"{d['signal_precision']:>8.0%}   "
+              f"{d['trades']:>5d}   "
+              f"{d['wins']:>3d}   "
+              f"{pnl_color}Rs {d['pnl']:>+,}{Style.RESET_ALL}")
+    print(f"  {'─'*12} {'─'*8} {'─'*10} {'─'*7} {'─'*5} {'─'*12}")
+
+    overall_precision = total_correct / total_signals if total_signals else 0
+    win_rate = total_wins / total_trades if total_trades else 0
+    avg_pnl = total_pnl / total_trades if total_trades else 0
+    profitable_days = sum(1 for d in day_results if d["pnl"] > 0)
+    test_days = len(day_results)
+
+    print(f"\n  Test days:         {test_days}")
+    print(f"  Profitable days:   {profitable_days}/{test_days} ({profitable_days/test_days*100:.0f}%)")
+    print(f"  Total signals:     {total_signals}")
+    print(f"  Signal precision:  {overall_precision:.0%} ({total_correct}/{total_signals})")
+    print(f"  Total trades:      {total_trades}  (LONG={len(longs)}  SHORT={len(shorts)})")
+    if runner:
+        trail_str = f"  TP_TRAIL={total_tp_trail}"
+        if total_trail_pct:
+            trail_str += f"  PCT_TRAIL={total_trail_pct}"
+        print(f"  Exit breakdown:    SL={total_sl}  TP2={total_tp2}{trail_str}  TIME/EOD={total_time}")
+        print(f"  Lot1 TP hits:      {total_lot1_tp}/{total_trades}")
+    else:
+        print(f"  Exit breakdown:    TP={total_tp}  SL={total_sl}  TIME/EOD={total_time}")
+    print(f"  SL breakdown:      LONG SL={long_sl} ({long_sl/len(longs)*100:.0f}%)  SHORT SL={short_sl} ({short_sl/len(shorts)*100:.0f}%)" if longs and shorts else "")
+    print(f"  Win rate:          {win_rate:.0%} ({total_wins}/{total_trades})")
+    print(f"  Avg P&L/trade:     Rs {avg_pnl:+,.0f}")
+    if not runner and total_tp + total_sl > 0:
+        print(f"  TP hit rate:       {total_tp/(total_tp+total_sl)*100:.0f}% (of TP+SL exits)")
+
+    if all_trades:
+        avg_mfe = sum(t["mfe_pts"] for t in all_trades) / total_trades
+        avg_mae = sum(t["mae_pts"] for t in all_trades) / total_trades
+        print(f"  Avg MFE (opt pts): {avg_mfe:+.1f}")
+        print(f"  Avg MAE (opt pts): {avg_mae:+.1f}")
+
+    pnl_color = Fore.GREEN if total_pnl >= 0 else Fore.RED
+    print(f"\n  {pnl_color}NET P&L:  Rs {total_pnl:+,}{Style.RESET_ALL}")
+
+    if all_trades:
+        print(f"\n  Equity curve (cumulative):")
+        cum = 0
+        for t in all_trades:
+            cum += t["pnl"]
+            bar_len = int(abs(cum) / 500)
+            bar_char = "█" if cum >= 0 else "░"
+            color = Fore.GREEN if cum >= 0 else Fore.RED
+            ts_str = str(t["timestamp"]).split(" ")[-1][:5]
+            print(f"    {str(t['timestamp']).split(' ')[0]} {ts_str}  "
+                  f"{color}{'':>1}{bar_char * min(bar_len, 40)} Rs {cum:>+,}{Style.RESET_ALL}")
+
+    print(f"\n{'='*70}\n")
 
 
 def main():
@@ -251,6 +445,24 @@ def main():
                         help="Number of initial days for training before testing starts")
     parser.add_argument("--retrain-every", type=int, default=3,
                         help="Retrain model every N days (expanding window)")
+    parser.add_argument("--runner", action="store_true",
+                        help="Two-lot runner: lot1 exits at TP, lot2 rides to TP*ext or drops back to TP")
+    parser.add_argument("--runner-ext", type=float, default=1.3,
+                        help="Lot2 target multiplier on TP (default: 1.3 = TP*1.3)")
+    parser.add_argument("--runner-be", action="store_true",
+                        help="Lot2 floor moves to entry (breakeven) instead of TP after lot1 exits")
+    parser.add_argument("--lots", type=int, default=2,
+                        help="Total number of lots (split evenly between lot1/lot2 in runner mode)")
+    parser.add_argument("--direction", choices=["LONG", "SHORT"], default=None,
+                        help="Only take signals in this direction (LONG=calls, SHORT=puts)")
+    parser.add_argument("--long-conf", type=float, default=None,
+                        help="Override min-conf for LONG signals only (hybrid mode)")
+    parser.add_argument("--last-n-days", type=int, default=None,
+                        help="Validation mode: train on all days before last N, test only last N")
+    parser.add_argument("--slippage", type=float, default=2.0,
+                        help="Slippage in option points per side (default: 2.0)")
+    parser.add_argument("--retracement", type=float, default=None,
+                        help="Lot2 trailing stop: exit when price retraces this fraction from peak (e.g. 0.30 = 30%%)")
     args = parser.parse_args()
 
     instrument = args.instrument.lower()
@@ -261,11 +473,28 @@ def main():
     min_conf = args.min_conf
     warm_up = args.warm_up
     retrain_every = args.retrain_every
+    lot_size = LOT_SIZES.get(instrument, 65)
+    num_lots = args.lots
+    runner = args.runner
+    runner_ext = args.runner_ext
+    runner_be = args.runner_be
+    direction_filter = args.direction
+    long_conf = args.long_conf
+    last_n_days = args.last_n_days
+    slippage_pts = args.slippage
+    retracement_pct = args.retracement
 
     print(f"\n{'='*70}")
     print(f"  ML WALK-FORWARD BACKTEST — {instrument.upper()}")
+    floor_label = "BE(entry)" if runner_be else f"TP_TRAIL({target_pts}pts)"
+    mode_str = f"  Mode: TWO-LOT RUNNER (lot1→TP={target_pts}, lot2→TP*{runner_ext}={round(target_pts*runner_ext,1)} or {floor_label})" if runner else ""
+    if mode_str:
+        print(mode_str)
+    if last_n_days:
+        print(f"  Validation mode: testing last {last_n_days} days only")
     print(f"  Candle: {candle_minutes}-min | SL: {stop_pts}pts | TP: {target_pts}pts | Hold: {hold_minutes}min | MinConf: {min_conf}")
-    print(f"  Warm-up: {warm_up} days | Retrain every: {retrain_every} days")
+    if long_conf:
+        print(f"  Hybrid conf: SHORT≥{min_conf}  LONG≥{long_conf}")
     print(f"  Confidence threshold: {PROBA_THRESHOLD}")
     print(f"{'='*70}")
 
@@ -273,6 +502,70 @@ def main():
     if len(day_data) <= warm_up:
         print(f"Need more than {warm_up} days of data. Have {len(day_data)}.")
         sys.exit(1)
+
+    # In validation mode: train on everything before last N days, test only last N
+    if last_n_days:
+        if len(day_data) <= last_n_days:
+            print(f"Not enough days: have {len(day_data)}, need more than {last_n_days}.")
+            sys.exit(1)
+        split = len(day_data) - last_n_days
+        train_df = pd.concat([d["candles"] for d in day_data[:split]])
+        val_model, val_features, val_xpts, _ = train_model(train_df, instrument)
+        if val_model is None:
+            print("Training failed.")
+            sys.exit(1)
+        print(f"  Trained on {split} days. Testing on last {last_n_days} days.\n")
+        all_trades = []
+        day_results = []
+        for day in day_data[split:]:
+            preds = predict_day(val_model, val_features, val_xpts, day["candles"], instrument)
+            if not preds:
+                continue
+            signals = [p for p in preds if p["signal"] != 0]
+            correct  = [p for p in signals if p["signal"] == p["actual"]]
+            trades = simulate_ml_pnl(preds, val_xpts, candle_minutes=candle_minutes,
+                                     lot_size=lot_size, num_lots=num_lots,
+                                     stop_pts=stop_pts, target_pts=target_pts,
+                                     slippage_pts=slippage_pts,
+                                     hold_minutes=hold_minutes, min_conf=min_conf,
+                                     runner=runner, runner_ext=runner_ext,
+                                     runner_be=runner_be, direction_filter=direction_filter,
+                                     long_conf=long_conf, retracement_pct=retracement_pct)
+            day_pnl = sum(t["pnl"] for t in trades)
+            day_results.append({
+                "date": day["date"], "signals_fired": len(signals),
+                "signals_correct": len(correct),
+                "signal_precision": len(correct)/len(signals) if signals else 0,
+                "trades": len(trades), "wins": sum(1 for t in trades if t["pnl"] > 0),
+                "pnl": day_pnl,
+            })
+            all_trades.extend(trades)
+            sig_str = f"{len(correct)}/{len(signals)}"
+            pnl_color = Fore.GREEN if day_pnl >= 0 else Fore.RED
+            print(f"  {day['date']}:  signals={sig_str:>5s}  "
+                  f"precision={day_results[-1]['signal_precision']:>5.0%}  "
+                  f"trades={len(trades)}  "
+                  f"{pnl_color}P&L=Rs {day_pnl:>+,}{Style.RESET_ALL}")
+            for t in trades:
+                tc = Fore.GREEN if t["pnl"] > 0 else Fore.RED
+                sig_tag = "OK" if t["signal_correct"] else "WRONG"
+                if "lot1_pnl" in t:
+                    print(f"           {str(t['timestamp']).split(' ')[-1][:5]}  "
+                          f"{t['direction']:>5s}  conf={t['confidence']:.2f}  "
+                          f"MFE={t['mfe_pts']:+.1f}  MAE={t['mae_pts']:+.1f}  "
+                          f"L1={t['lot1_pnl']:+.0f}({t['lot1_exit']})  "
+                          f"L2={t['lot2_pnl']:+.0f}({t['lot2_exit']})  "
+                          f"{tc}Rs{t['pnl']:>+,}{Style.RESET_ALL}  [{sig_tag}]")
+                else:
+                    print(f"           {str(t['timestamp']).split(' ')[-1][:5]}  "
+                          f"{t['direction']:>5s}  conf={t['confidence']:.2f}  "
+                          f"MFE={t['mfe_pts']:+.1f}  MAE={t['mae_pts']:+.1f}  "
+                          f"{t['exit_reason']:>4s}  opt={t['option_pnl']:+.1f}  "
+                          f"{tc}Rs{t['pnl']:>+,}{Style.RESET_ALL}  [{sig_tag}]")
+
+        # Jump straight to summary using collected data
+        _print_summary(instrument, day_results, all_trades, runner)
+        return
 
     # Aggregate results
     all_predictions = []
@@ -317,8 +610,13 @@ def main():
 
         # P&L
         trades = simulate_ml_pnl(preds, x_points, candle_minutes=candle_minutes,
+                                 lot_size=lot_size, num_lots=num_lots,
                                  stop_pts=stop_pts, target_pts=target_pts,
-                                 hold_minutes=hold_minutes, min_conf=min_conf)
+                                 slippage_pts=slippage_pts,
+                                 hold_minutes=hold_minutes, min_conf=min_conf,
+                                 runner=runner, runner_ext=runner_ext,
+                                 runner_be=runner_be, direction_filter=direction_filter,
+                                 long_conf=long_conf, retracement_pct=retracement_pct)
         day_pnl = sum(t["pnl"] for t in trades)
 
         day_result = {
@@ -347,81 +645,21 @@ def main():
         for t in trades:
             tc = Fore.GREEN if t["pnl"] > 0 else Fore.RED
             sig_tag = "OK" if t["signal_correct"] else "WRONG"
-            print(f"           {str(t['timestamp']).split(' ')[-1][:5]}  "
-                  f"{t['direction']:>5s}  conf={t['confidence']:.2f}  "
-                  f"peak={t['peak_pts']:+.0f}  "
-                  f"{t['exit_reason']:>4s}  opt={t['option_pnl']:+.1f}  "
-                  f"{tc}Rs{t['pnl']:>+,}{Style.RESET_ALL}  [{sig_tag}]")
+            if "lot1_pnl" in t:
+                print(f"           {str(t['timestamp']).split(' ')[-1][:5]}  "
+                      f"{t['direction']:>5s}  conf={t['confidence']:.2f}  "
+                      f"MFE={t['mfe_pts']:+.1f}  MAE={t['mae_pts']:+.1f}  "
+                      f"L1={t['lot1_pnl']:+.0f}({t['lot1_exit']})  "
+                      f"L2={t['lot2_pnl']:+.0f}({t['lot2_exit']})  "
+                      f"{tc}Rs{t['pnl']:>+,}{Style.RESET_ALL}  [{sig_tag}]")
+            else:
+                print(f"           {str(t['timestamp']).split(' ')[-1][:5]}  "
+                      f"{t['direction']:>5s}  conf={t['confidence']:.2f}  "
+                      f"MFE={t['mfe_pts']:+.1f}  MAE={t['mae_pts']:+.1f}  "
+                      f"{t['exit_reason']:>4s}  opt={t['option_pnl']:+.1f}  "
+                      f"{tc}Rs{t['pnl']:>+,}{Style.RESET_ALL}  [{sig_tag}]")
 
-    # ── Final Summary ────────────────────────────────────────────────────────
-    print(f"\n{'='*70}")
-    print(f"  SUMMARY — {instrument.upper()} ML BACKTEST")
-    print(f"{'='*70}")
-
-    if not day_results:
-        print("  No test days produced results.")
-        return
-
-    total_signals = sum(d["signals_fired"] for d in day_results)
-    total_correct = sum(d["signals_correct"] for d in day_results)
-    total_trades = len(all_trades)
-    total_wins = sum(1 for t in all_trades if t["pnl"] > 0)
-    total_pnl = sum(t["pnl"] for t in all_trades)
-    total_tp = sum(1 for t in all_trades if t["exit_reason"] == "TP")
-    total_sl = sum(1 for t in all_trades if t["exit_reason"] == "SL")
-    total_time = sum(1 for t in all_trades if t["exit_reason"] in ("TIME", "EOD"))
-
-    # Day-by-day P&L table
-    print(f"\n  {'Date':<12s} {'Signals':>8s} {'Precision':>10s} {'Trades':>7s} {'Wins':>5s} {'P&L':>12s}")
-    print(f"  {'─'*12} {'─'*8} {'─'*10} {'─'*7} {'─'*5} {'─'*12}")
-    cum_pnl = 0
-    for d in day_results:
-        cum_pnl += d["pnl"]
-        pnl_color = Fore.GREEN if d["pnl"] >= 0 else Fore.RED
-        print(f"  {d['date']:<12s} "
-              f"{d['signals_correct']}/{d['signals_fired']:>3d}     "
-              f"{d['signal_precision']:>8.0%}   "
-              f"{d['trades']:>5d}   "
-              f"{d['wins']:>3d}   "
-              f"{pnl_color}Rs {d['pnl']:>+,}{Style.RESET_ALL}")
-
-    print(f"  {'─'*12} {'─'*8} {'─'*10} {'─'*7} {'─'*5} {'─'*12}")
-
-    # Totals
-    overall_precision = total_correct / total_signals if total_signals else 0
-    win_rate = total_wins / total_trades if total_trades else 0
-    avg_pnl = total_pnl / total_trades if total_trades else 0
-    profitable_days = sum(1 for d in day_results if d["pnl"] > 0)
-    test_days = len(day_results)
-
-    print(f"\n  Test days:         {test_days}")
-    print(f"  Profitable days:   {profitable_days}/{test_days} ({profitable_days/test_days*100:.0f}%)")
-    print(f"  Total signals:     {total_signals}")
-    print(f"  Signal precision:  {overall_precision:.0%} ({total_correct}/{total_signals})")
-    print(f"  Total trades:      {total_trades}")
-    print(f"  Exit breakdown:    TP={total_tp}  SL={total_sl}  TIME/EOD={total_time}")
-    print(f"  Win rate:          {win_rate:.0%} ({total_wins}/{total_trades})")
-    print(f"  Avg P&L/trade:     Rs {avg_pnl:+,.0f}")
-    if total_tp + total_sl > 0:
-        print(f"  TP hit rate:       {total_tp/(total_tp+total_sl)*100:.0f}% (of TP+SL exits)")
-
-    pnl_color = Fore.GREEN if total_pnl >= 0 else Fore.RED
-    print(f"\n  {pnl_color}NET P&L:  Rs {total_pnl:+,}{Style.RESET_ALL}")
-
-    # Equity curve
-    if all_trades:
-        print(f"\n  Equity curve (cumulative):")
-        cum = 0
-        for t in all_trades:
-            cum += t["pnl"]
-            bar_len = int(abs(cum) / 500)
-            bar_char = "█" if cum >= 0 else "░"
-            color = Fore.GREEN if cum >= 0 else Fore.RED
-            ts_str = str(t["timestamp"]).split(" ")[-1][:5]
-            print(f"    {str(t['timestamp']).split(' ')[0]} {ts_str}  "
-                  f"{color}{'':>1}{bar_char * min(bar_len, 40)} Rs {cum:>+,}{Style.RESET_ALL}")
-
-    print(f"\n{'='*70}\n")
+    _print_summary(instrument, day_results, all_trades, runner)
 
 
 if __name__ == "__main__":
