@@ -49,7 +49,7 @@ RUNNER_CONFIGS = {
         "lot_size":         20,
         "default_lots":     6,
         "hold_candles":     9,         # 45 min / 5 min
-        "target_delta":     0.30,
+        "target_delta":     0.40,
         "candle_minutes":   5,
     },
     "nifty": {
@@ -250,7 +250,7 @@ class MLRunner:
         print(f"  Lot2 floor: {trail_desc}")
         print(f"{'='*60}\n")
 
-        # Load or train model
+        # Load or train model (done early so it's ready by 9:15)
         if os.path.exists(self.engine.model_xgb) and os.path.exists(self.engine.model_file):
             try:
                 self.engine.load()
@@ -264,6 +264,9 @@ class MLRunner:
 
         # Restore state from disk if we crashed mid-trade
         self._load_state()
+
+        # Wait until 9:15 before alerting and entering the main loop
+        self._wait_until_market_open()
 
         self._send_alert(
             f"🤖 ML Runner started — {self.instrument.upper()} [{mode_label}]\n"
@@ -282,7 +285,7 @@ class MLRunner:
             sys.exit(1)
 
         files = files[-30:]  # last 30 days
-        live_csv = self.profile["csv_file"]
+        live_csv = self._today_csv()
         if os.path.exists(live_csv):
             files.append(live_csv)
 
@@ -318,9 +321,10 @@ class MLRunner:
                 break
 
             try:
-                # 1. If in position, monitor exits every minute
+                # 1. If in position, monitor exits at 5-second intervals
                 if self.state in (TradeState.POSITION_OPEN, TradeState.LOT1_EXITED):
-                    self._monitor_position()
+                    self._monitor_position_fast()
+                    continue
 
                 # 2. Check for new ML signal at 5-min boundaries
                 if self.state in (TradeState.IDLE, TradeState.COOLDOWN):
@@ -334,22 +338,49 @@ class MLRunner:
 
     # ── Signal Detection ───────────────────────────────────────────────────────
 
+    def _today_csv(self):
+        date_str = datetime.now().strftime("%d%m%Y")
+        return f"data/options_log_1min_{self.instrument}_{date_str}.csv"
+
+    def _live_csv(self):
+        return self.profile["csv_file"]
+
+    def _next_candle_time(self):
+        now = datetime.now()
+        mins = now.minute
+        next_min = ((mins // self.cfg["candle_minutes"]) + 1) * self.cfg["candle_minutes"]
+        if next_min >= 60:
+            return (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        return now.replace(minute=next_min, second=0, microsecond=0)
+
     def _check_signal(self):
-        csv_file = self.profile["csv_file"]
+        csv_file = self._live_csv()
         if not os.path.exists(csv_file):
+            print(f"  ⚠ CSV not found: {csv_file}")
             return
 
         try:
             raw = self.resampler.load_csv(csv_file)
             candles = self.resampler.resample_v2(raw)
-        except Exception:
+        except Exception as e:
+            print(f"  ⚠ Failed to load/resample {csv_file}: {e}")
             return
 
+        # Exclude the current live candle — its window hasn't closed yet
+        now = datetime.now()
+        closed_until = pd.Timestamp(now).floor(f"{self.cfg['candle_minutes']}min")
+        candles = candles[candles.index < closed_until]
+
         if len(candles) < 2:
+            print(f"  ⚠ Not enough candles yet ({len(candles)})")
             return
 
         # Only act on a NEW candle
+
         if len(candles) == self.last_candle_count:
+            next_candle = self._next_candle_time()
+            print(f"  [{now.strftime('%H:%M:%S')}] Waiting — {len(candles)} candles, "
+                  f"next check at {next_candle.strftime('%H:%M')}")
             return
         self.last_candle_count = len(candles)
 
@@ -366,11 +397,13 @@ class MLRunner:
         latest = candles.iloc[-1].to_dict()
         result = self.engine.predict_latest(latest)
 
+        now = datetime.now()
+        direction = "LONG" if result["signal"] == 1 else ("SHORT" if result["signal"] == -1 else "FLAT")
+        confidence = result["confidence"]
+        print(f"  [{now.strftime('%H:%M:%S')}] Candle {len(candles)} → {direction} conf={confidence:.2f}")
+
         if result["signal"] == 0:
             return
-
-        direction = "LONG" if result["signal"] == 1 else "SHORT"
-        confidence = result["confidence"]
 
         # Hybrid confidence filter
         min_conf = (self.cfg["min_conf_long"] if direction == "LONG"
@@ -516,10 +549,22 @@ class MLRunner:
 
     # ── Position Monitor ───────────────────────────────────────────────────────
 
+    def _monitor_position_fast(self):
+        """Poll position every 5 seconds until closed or next minute boundary."""
+        next_min = datetime.now().replace(second=2, microsecond=0) + timedelta(minutes=1)
+        while datetime.now() < next_min:
+            if self.state not in (TradeState.POSITION_OPEN, TradeState.LOT1_EXITED):
+                break
+            self._monitor_position()
+            if self.state not in (TradeState.POSITION_OPEN, TradeState.LOT1_EXITED):
+                break
+            time.sleep(5)
+
     def _monitor_position(self):
         t = self.trade
         ltp = get_ltp_safe(self.kite, t["full_symbol"])
         if ltp is None:
+            print(f"  ⚠ Could not fetch LTP for {t['full_symbol']} — skipping monitor tick")
             return
 
         now = datetime.now()
@@ -844,11 +889,23 @@ class MLRunner:
             })
 
         if not candidates:
+            print(f"  ⚠ No valid candidates found for {option_type} (all failed LTP/IV)")
             return None, None
+
+        # Log all candidates
+        for c in sorted(candidates, key=lambda x: x["strike"]):
+            print(f"    Strike {c['strike']} {option_type}: delta={c['delta']:.3f} ltp={c['ltp']}")
 
         # Pick closest to target delta
         target = self.cfg["target_delta"]
         best = min(candidates, key=lambda c: abs(c["abs_delta"] - target))
+
+        # Sanity check — reject if no candidate is within 0.15 of target
+        if abs(best["abs_delta"] - target) > 0.15:
+            print(f"  ⚠ Best candidate strike {best['strike']} has delta={best['delta']:.3f}, "
+                  f"too far from target {target} — skipping entry")
+            return None, None
+
         print(f"  Selected strike {best['strike']} {option_type} "
               f"delta={best['delta']:.3f} ltp={best['ltp']}")
         return best["strike"], best["trading_sym"]
@@ -1000,6 +1057,14 @@ class MLRunner:
         self._send_alert("\n".join(lines))
 
     # ── Timing ─────────────────────────────────────────────────────────────────
+
+    def _wait_until_market_open(self):
+        now = datetime.now()
+        target = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        wait_secs = (target - now).total_seconds()
+        if wait_secs > 0:
+            print(f"  Pre-market: waiting {int(wait_secs)}s until 9:15...")
+            time.sleep(wait_secs)
 
     def _wait_until_next_minute(self):
         now = datetime.now()

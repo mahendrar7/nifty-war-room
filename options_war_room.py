@@ -615,23 +615,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     state.previous_gamma = gamma
     state.previous_spot  = spot   # FIX: store actual spot for next tick
 
-    # ── ML signal agreement ───────────────────────────────────────────────
-    if state.last_ml_result is not None:
-        ml_bias_str = _ml_bias_to_str(state.last_ml_result["signal"])
-
-        # FIX: ML kill switch — suppress ML when it's been consistently wrong
-        # Only activate kill switch after enough training data (1000 candles)
-        from config import ML_CONSECUTIVE_WRONG_KILL
-        ml_killed = (state.ml_consecutive_wrong >= ML_CONSECUTIVE_WRONG_KILL)
-
-        if ml_killed or state.last_ml_result["signal"] == 0:
-            ml_signal = "neutral"
-        elif ml_bias_str == bias:
-            ml_signal = "agree"
-        else:
-            ml_signal = "conflict"
-    else:
-        ml_signal = "neutral"
+    ml_signal = "neutral"
 
     # ── Gamma flip danger zone Telegram ──────────────────────────────────
     if flip_level:
@@ -880,16 +864,6 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
 
     print(Fore.GREEN + f"ACTION: {action}" + Style.RESET_ALL)
 
-    # ML — compact: label + agree/conflict only
-    if state.last_ml_result is not None and state.last_ml_result["signal"] != 0:
-        lr = state.last_ml_result
-        ml_color = Fore.GREEN if lr["signal"] == 1 else Fore.RED
-        agree_tag = (f"  {Fore.GREEN}✅" if _ml_bias_to_str(lr["signal"]) == bias
-                     else f"  {Fore.YELLOW}⚠")
-        print(ml_color +
-              f"ML: {lr['label']}  ({lr['confidence']:.0%})"
-              + Style.RESET_ALL + agree_tag + Style.RESET_ALL)
-
     # Hold the line — active trade OR shadow mode on last suggestion
     htl = None
     htl_source = None   # "active" or "shadow"
@@ -1112,9 +1086,6 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         if cw_ret or pw_ret:
             print(f"Wall retreat: call={'YES' if cw_ret else 'no'}({cw_cnt})  "
                   f"put={'YES' if pw_ret else 'no'}({pw_cnt})")
-        if state.ml_consecutive_wrong >= 3:
-            print(Fore.YELLOW + f"ML streak: {state.ml_consecutive_wrong} wrong in a row"
-                  + Style.RESET_ALL)
         if pcr_signal == "NEUTRAL":
             print(f"PCR:{pcr_val} (NEUTRAL)")
         if momentum_strikes:
@@ -1197,8 +1168,6 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
 
     # ── Persist all derived signals for post-session debrief ──────────────
     _ml_conf = None
-    if state.last_ml_result is not None and state.last_ml_result["signal"] != 0:
-        _ml_conf = round(state.last_ml_result["confidence"], 3)
 
     save_signals(
         spot=spot, atm=atm, gamma=gamma, straddle=straddle,
@@ -1355,12 +1324,6 @@ def _write_snapshot(**kw):
                 "peak_stale": ps["peak_stale"],
             }
 
-    # ML
-    if state.last_ml_result and state.last_ml_result["signal"] != 0:
-        lr = state.last_ml_result
-        snap["ml"] = {"label": lr["label"], "confidence": round(lr["confidence"], 2),
-                       "x_points": round(lr["x_points"], 0)}
-
     # Heavyweights
     hw = kw["hw_momentum"]
     if hw:
@@ -1412,48 +1375,6 @@ def _write_snapshot(**kw):
         pass   # never crash the main loop for a status file
 
 
-# =============================================================================
-# ML HELPERS
-# =============================================================================
-try:
-    from ml_engine import MLSignal
-
-    ML_AVAILABLE = True
-except ImportError:
-    ML_AVAILABLE = False
-    print("⚠ ml_engine.py not found — running without ML predictions")
-
-
-def _ml_bias_to_str(signal):
-    return {1: "BULLISH", -1: "BEARISH", 0: "RANGE"}.get(signal, "RANGE")
-
-
-def _print_feedback_verdicts(resolved):
-    print_divider()
-    print("📬 ML OUTCOME REPORT")
-    for r in resolved:
-        sig_label = {1: "BULLISH", -1: "BEARISH"}.get(r["signal"], "?")
-        color = Fore.GREEN if r["outcome"] == "correct" else Fore.RED
-        move_str = f"+{r['actual_move']:.1f}" if r["actual_move"] >= 0 else f"{r['actual_move']:.1f}"
-        print(color + f"  {r['verdict']}  │  Called {sig_label} at {r['spot_at_signal']:.0f}  "
-                      f"│  Moved {move_str}pts  │  Target was ±{r['x_points']:.0f}pts")
-        notify(
-            f"{r['verdict']} ML: called {sig_label} @ {r['spot_at_signal']:.0f} | "
-            f"moved {move_str}pts | ±{r['x_points']:.0f}pts → {r['outcome'].upper()}"
-        )
-
-        # FIX: Track consecutive wrong for ML kill switch
-        if r["outcome"] == "wrong":
-            state.ml_consecutive_wrong += 1
-        else:
-            state.ml_consecutive_wrong = 0
-
-        from config import ML_CONSECUTIVE_WRONG_KILL
-        if state.ml_consecutive_wrong >= ML_CONSECUTIVE_WRONG_KILL:
-            print(Fore.YELLOW +
-                  f"  ⚠ ML KILLED: {state.ml_consecutive_wrong} consecutive wrong — "
-                  f"suppressing to neutral until correct"
-                  + Style.RESET_ALL)
 
 
 # =============================================================================
@@ -1698,8 +1619,6 @@ def run_logger():
     MAX_ERRORS = 5
     archived_today = False
 
-    ml = MLSignal(instrument=_instrument_arg.lower()) if ML_AVAILABLE else None
-
     print("✅ Options Intelligence Terminal Started")
 
     while True:
@@ -1713,16 +1632,6 @@ def run_logger():
             _stop_price_tracker()
             state.reset_session()
             clear_hw_history()
-            if ml is not None:
-                try:
-                    print("🔄 Retraining ML model...")
-                    ml.engine.rolling_retrain(lookback_days=30)
-                    ml.ready = True
-                    state.ml_consecutive_wrong = 0
-                    print("✅ ML retrained — kill switch reset")
-                except Exception as e:
-                    print(f"⚠ ML retrain failed: {e}")
-
             # Daily sniper backtest report
             try:
                 from backtest_from_oi import run_daily_report
@@ -1786,39 +1695,6 @@ def run_logger():
             save_rows(rows, spot, atm, expiry, gamma, straddle, bias, trap_prob, counter,
                       theta_pct=theta_ctx["theta_pct"] if theta_ctx else 0.0,
                       atm_iv=theta_ctx["atm_iv"] if theta_ctx else 0.0)
-
-            if ml is not None:
-                minutes_since_open = (now.hour * 60 + now.minute) - (9 * 60 + 15)
-                days_to_expiry = (expiry - now.date()).days
-                ml_result = ml.on_tick(
-                    df=df, spot=spot, atm=atm, gamma=gamma,
-                    straddle=straddle, trap_prob=trap_prob,
-                    breakout_cycles=counter, bias=bias,
-                    minutes_since_open=minutes_since_open,
-                    days_to_expiry=days_to_expiry,
-                    theta_pct=theta_ctx["theta_pct"] if theta_ctx else 0.0,
-                    atm_iv=theta_ctx["atm_iv"]       if theta_ctx else 0.0,
-                )
-
-                if isinstance(ml_result, dict) and "resolved" in ml_result:
-                    _print_feedback_verdicts(ml_result["resolved"])
-
-                if ml_result is not None and "resolved" not in ml_result:
-                    state.last_ml_result = ml_result
-                    # Inline ML display — compressed for clean layout
-                    lr = ml_result
-                    ml_color = (Fore.GREEN if lr["signal"] == 1
-                                else Fore.RED if lr["signal"] == -1
-                    else Fore.WHITE)
-                    agree_tag = ""
-                    if lr["signal"] != 0:
-                        agree_tag = (f"  {Fore.GREEN}✅" if _ml_bias_to_str(lr["signal"]) == bias
-                                     else f"  {Fore.YELLOW}⚠")
-                    print(ml_color +
-                          f"ML: {lr['label']}  ({lr['confidence']:.0%})  "
-                          f"±{lr['x_points']:.0f}pts  🟢{lr['p_bullish']:.0%}  "
-                          f"🔴{lr['p_bearish']:.0%}"
-                          + Style.RESET_ALL + agree_tag)
 
             consecutive_errors = 0
 
