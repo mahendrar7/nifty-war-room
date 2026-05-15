@@ -161,7 +161,8 @@ class MLRunner:
 
         # Paper trading
         self._paper_order_counter = 0
-        self._paper_log_file = f"data/ml_paper_log_{self.instrument}.csv"
+        mode = "paper" if paper else "live"
+        self._trade_log_file = f"data/ml_{mode}_log_{self.instrument}.csv"
 
         # Session trade log for EOD summary
         self.completed_trades = []
@@ -213,7 +214,7 @@ class MLRunner:
         prefix = "📝 [PAPER] " if self.paper else ""
         send_telegram_message(prefix + msg)
 
-    def _log_paper_trade(self, action, price, qty, pnl=None, notes=""):
+    def _log_trade(self, action, price, qty, pnl=None, notes=""):
         t = self.trade
         row = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -229,8 +230,8 @@ class MLRunner:
             "pnl": pnl if pnl is not None else "",
             "notes": notes,
         }
-        write_header = not os.path.exists(self._paper_log_file)
-        with open(self._paper_log_file, "a", newline="") as f:
+        write_header = not os.path.exists(self._trade_log_file)
+        with open(self._trade_log_file, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=row.keys())
             if write_header:
                 writer.writeheader()
@@ -543,9 +544,8 @@ class MLRunner:
         )
         print(f"  ✅ Entry: {trading_sym} @ {entry_price}, SL-M @ {sl_trigger}")
 
-        if self.paper:
-            self._log_paper_trade("ENTRY", entry_price, total_qty,
-                                  notes=f"conf={confidence:.2f}")
+        self._log_trade("ENTRY", entry_price, total_qty,
+                        notes=f"conf={confidence:.2f}")
 
     # ── Position Monitor ───────────────────────────────────────────────────────
 
@@ -589,9 +589,7 @@ class MLRunner:
                 f"Entry: {t['entry_price']} → Exit: {t['sl_trigger']}\n"
                 f"P&L: Rs {pnl:+,}"
             )
-            if self.paper:
-                self._log_paper_trade("SL_HIT", t["sl_trigger"], t["total_qty"],
-                                      pnl=pnl)
+            self._log_trade("SL_HIT", t["sl_trigger"], t["total_qty"], pnl=pnl)
             self._close_trade(candles_held, pnl=pnl, exit_type="SL")
             return
 
@@ -621,9 +619,7 @@ class MLRunner:
                 f"Lot1 P&L: Rs {pnl_lot1:+,} | Lot2 P&L: Rs {pnl_lot2:+,}\n"
                 f"Total: Rs {total_pnl:+,}"
             )
-            if self.paper:
-                self._log_paper_trade("LOT2_TRAIL", sl_price, t["qty_per_side"],
-                                      pnl=total_pnl)
+            self._log_trade("LOT2_TRAIL", sl_price, t["qty_per_side"], pnl=total_pnl)
             self._close_trade(candles_held, pnl=total_pnl, exit_type="TRAIL")
             return
 
@@ -705,9 +701,8 @@ class MLRunner:
             f"Lot2 running — SL-M @ {lot2_sl_trigger} | TP2 target: {t['tp2_price']}"
         )
 
-        if self.paper:
-            self._log_paper_trade("LOT1_TP", lot1_exit_price, t["qty_per_side"],
-                                  pnl=lot1_pnl, notes="lot2 running")
+        self._log_trade("LOT1_TP", lot1_exit_price, t["qty_per_side"],
+                        pnl=lot1_pnl, notes="lot2 running")
 
     # ── Lot2 Trail Update ──────────────────────────────────────────────────────
 
@@ -762,9 +757,7 @@ class MLRunner:
             f"⏱️ {reason} EXIT: Sold {t['total_qty']} qty {t['trading_sym']} @ ~{current_ltp}\n"
             f"Entry: {t['entry_price']} | P&L: Rs {pnl:+,}"
         )
-        if self.paper:
-            self._log_paper_trade(f"{reason}_EXIT", current_ltp, t["total_qty"],
-                                  pnl=pnl)
+        self._log_trade(f"{reason}_EXIT", current_ltp, t["total_qty"], pnl=pnl)
         self._close_trade(t["candles_held"], pnl=pnl, exit_type=reason)
 
     def _exit_lot2_market(self, current_ltp, reason):
@@ -801,9 +794,8 @@ class MLRunner:
             f"Lot1: Rs {lot1_pnl:+,} | Lot2: Rs {lot2_pnl:+,}\n"
             f"Total: Rs {total_pnl:+,}"
         )
-        if self.paper:
-            self._log_paper_trade(f"LOT2_{reason}", exit_price, t["qty_per_side"],
-                                  pnl=total_pnl, notes=f"peak={t['lot2_peak_ltp']:.1f}")
+        self._log_trade(f"LOT2_{reason}", exit_price, t["qty_per_side"],
+                        pnl=total_pnl, notes=f"peak={t['lot2_peak_ltp']:.1f}")
         self._close_trade(t["candles_held"], pnl=total_pnl, exit_type=reason)
 
     def _close_trade(self, candles_held, pnl=0, exit_type=""):
@@ -1010,6 +1002,9 @@ class MLRunner:
         # Send EOD summary
         self._send_eod_summary()
 
+        # Archive trade log on expiry day
+        self._archive_trade_log_on_expiry()
+
         # Retrain model for tomorrow
         print("\n  EOD — retraining 5-min model...")
         try:
@@ -1020,6 +1015,20 @@ class MLRunner:
         # Clean up state file
         if os.path.exists(self.state_file):
             os.remove(self.state_file)
+
+    def _archive_trade_log_on_expiry(self):
+        if not os.path.exists(self._trade_log_file):
+            return
+        try:
+            expiry = self._get_nearest_expiry()
+        except Exception:
+            expiry = None
+        if expiry != date.today():
+            return
+        date_str = date.today().strftime("%d%m%Y")
+        archive = self._trade_log_file.replace(".csv", f"_{date_str}.csv")
+        os.replace(self._trade_log_file, archive)
+        print(f"  📁 Trade log archived: {archive}")
 
     def _send_eod_summary(self):
         trades = self.completed_trades
