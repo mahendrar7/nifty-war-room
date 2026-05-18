@@ -111,6 +111,9 @@ def predict_day(model, feature_cols, x_points, test_candles, instrument="nifty")
     probas = model.predict_proba(X)
     inv = {0: -1, 1: 0, 2: 1}
 
+    trend_pts_vals  = df["trend_pts"].values       if "trend_pts"    in df.columns else np.zeros(len(X))
+    bias_enc_vals   = df["bias_encoded"].values    if "bias_encoded" in df.columns else np.zeros(len(X))
+
     results = []
     for i in range(len(X)):
         pred_class = np.argmax(probas[i])
@@ -121,14 +124,16 @@ def predict_day(model, feature_cols, x_points, test_candles, instrument="nifty")
             signal = 0
 
         results.append({
-            "timestamp": timestamps[i],
-            "spot": spots[i],
-            "signal": signal,
-            "actual": y_true[i],
-            "confidence": confidence,
-            "p_bearish": probas[i][0],
-            "p_no_move": probas[i][1],
-            "p_bullish": probas[i][2],
+            "timestamp":   timestamps[i],
+            "spot":        spots[i],
+            "signal":      signal,
+            "actual":      y_true[i],
+            "confidence":  confidence,
+            "p_bearish":   probas[i][0],
+            "p_no_move":   probas[i][1],
+            "p_bullish":   probas[i][2],
+            "trend_pts":   float(trend_pts_vals[i]),
+            "bias_encoded": int(bias_enc_vals[i]),
         })
 
     return results
@@ -142,7 +147,9 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
                      stop_pts=15, target_pts=25, slippage_pts=2,
                      hold_minutes=45, min_conf=0.55, runner=False,
                      runner_ext=1.3, runner_be=False, direction_filter=None,
-                     long_conf=None, retracement_pct=None, lot2_entry_buffer=None):
+                     long_conf=None, retracement_pct=None, lot2_entry_buffer=None,
+                     sl_circuit_breaker=None, circuit_pause_candles=2,
+                     counter_trend_pts_limit=None):
     """
     Strict fixed SL/TP simulation on option value.
 
@@ -155,6 +162,7 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
     qty = lot_size * num_lots
     trades = []
     cooldown = 0
+    consecutive_sl = 0
 
     for i, pred in enumerate(predictions):
         if cooldown > 0:
@@ -178,6 +186,17 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
 
         if direction_filter and direction != direction_filter:
             continue
+
+        # Counter-trend gate
+        if counter_trend_pts_limit is not None:
+            trend_pts_val = pred.get("trend_pts", 0)
+            bias_enc_val  = pred.get("bias_encoded", 0)
+            if trend_pts_val > counter_trend_pts_limit and bias_enc_val != 0:
+                is_counter = (direction == "SHORT" and bias_enc_val == 1) or \
+                             (direction == "LONG"  and bias_enc_val == -1)
+                if is_counter:
+                    continue
+
         entry_spot = pred["spot"]
 
         nifty_stop = stop_pts / delta
@@ -317,6 +336,15 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
             net_pnl = round((option_pnl - slippage_pts) * qty)
 
         cooldown = max(1, candles_held)
+
+        # Circuit breaker: pause after N consecutive SLs
+        if exit_reason == "SL":
+            consecutive_sl += 1
+            if sl_circuit_breaker and consecutive_sl >= sl_circuit_breaker:
+                cooldown = max(cooldown, circuit_pause_candles)
+                consecutive_sl = 0  # reset after enforced pause
+        else:
+            consecutive_sl = 0
 
         mfe_pts = round(peak_move * delta, 1)
         mae_pts = round(worst_move * delta, 1)
@@ -473,6 +501,8 @@ def main():
                         help="Lot2 trailing stop: exit when price retraces this fraction from peak (e.g. 0.30 = 30%%)")
     parser.add_argument("--lot2-floor", type=float, default=None, dest="lot2_floor",
                         help="Lot2 SL floor in option pts above entry after lot1 TP (e.g. 10)")
+    parser.add_argument("--ct-limit", type=float, default=None, dest="ct_limit",
+                        help="Counter-trend gate: block signals opposing trend when trend_pts > N (e.g. 300)")
     args = parser.parse_args()
 
     instrument = args.instrument.lower()
@@ -494,6 +524,7 @@ def main():
     slippage_pts = args.slippage
     retracement_pct = args.retracement
     lot2_floor = args.lot2_floor
+    ct_limit   = args.ct_limit
 
     print(f"\n{'='*70}")
     print(f"  ML WALK-FORWARD BACKTEST — {instrument.upper()}")
@@ -542,7 +573,8 @@ def main():
                                      runner=runner, runner_ext=runner_ext,
                                      runner_be=runner_be, direction_filter=direction_filter,
                                      long_conf=long_conf, retracement_pct=retracement_pct,
-                                     lot2_entry_buffer=lot2_floor)
+                                     lot2_entry_buffer=lot2_floor,
+                                     counter_trend_pts_limit=ct_limit)
             day_pnl = sum(t["pnl"] for t in trades)
             day_results.append({
                 "date": day["date"], "signals_fired": len(signals),
@@ -628,7 +660,9 @@ def main():
                                  hold_minutes=hold_minutes, min_conf=min_conf,
                                  runner=runner, runner_ext=runner_ext,
                                  runner_be=runner_be, direction_filter=direction_filter,
-                                 long_conf=long_conf, retracement_pct=retracement_pct)
+                                 long_conf=long_conf, retracement_pct=retracement_pct,
+                                 lot2_entry_buffer=lot2_floor,
+                                 counter_trend_pts_limit=ct_limit)
         day_pnl = sum(t["pnl"] for t in trades)
 
         day_result = {

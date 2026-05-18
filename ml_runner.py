@@ -45,6 +45,8 @@ RUNNER_CONFIGS = {
         "runner_ext":       2.16,
         "retracement_pct":  0.10,
         "lot2_floor_pts":   10,        # lot2 SL floor above entry after lot1 TP
+        "sl_circuit_breaker": 2,       # pause after N consecutive SLs
+        "circuit_pause_candles": 2,    # extra candles to sit out
         "min_conf_short":   0.55,
         "min_conf_long":    0.75,
         "lot_size":         20,
@@ -59,6 +61,8 @@ RUNNER_CONFIGS = {
         "runner_ext":       2.2,
         "retracement_pct":  None,      # uses fixed TP_TRAIL
         "lot2_floor_pts":   3,         # lot2 SL floor above entry after lot1 TP
+        "sl_circuit_breaker": 2,       # pause after N consecutive SLs
+        "circuit_pause_candles": 2,    # extra candles to sit out
         "min_conf_short":   0.55,
         "min_conf_long":    0.55,
         "lot_size":         65,
@@ -160,6 +164,7 @@ class MLRunner:
         self.trade = {}
         self.cooldown_remaining = 0
         self.last_candle_count = 0
+        self.consecutive_sl = 0
 
         # Paper trading
         self._paper_order_counter = 0
@@ -420,6 +425,17 @@ class MLRunner:
         if now.hour >= 15:
             print(f"  Signal {direction} skipped — too close to market close")
             return
+
+        # Strong-trend counter-trend gate: block signals opposing bias when trend > 300pts
+        trend_pts   = latest.get("trend_pts", 0)
+        bias_enc    = latest.get("bias_encoded", 0)
+        ct_threshold = self.cfg.get("counter_trend_pts_limit", 300)
+        if trend_pts > ct_threshold and bias_enc != 0:
+            is_counter = (direction == "SHORT" and bias_enc == 1) or \
+                         (direction == "LONG"  and bias_enc == -1)
+            if is_counter:
+                print(f"  Signal {direction} blocked — counter-trend in {trend_pts:.0f}pt trend")
+                return
 
         print(f"\n  📡 ML SIGNAL: {direction} conf={confidence:.2f}")
         self._enter_trade(direction, confidence)
@@ -811,6 +827,18 @@ class MLRunner:
             "exit_type": exit_type,
         })
         self.cooldown_remaining = max(1, candles_held)
+
+        if exit_type == "SL":
+            self.consecutive_sl += 1
+            cb = self.cfg.get("sl_circuit_breaker")
+            if cb and self.consecutive_sl >= cb:
+                pause = self.cfg.get("circuit_pause_candles", 2)
+                self.cooldown_remaining = max(self.cooldown_remaining, pause)
+                print(f"  ⚡ Circuit breaker: {self.consecutive_sl} consecutive SLs — pausing {self.cooldown_remaining} candles")
+                self.consecutive_sl = 0
+        else:
+            self.consecutive_sl = 0
+
         self.state = TradeState.COOLDOWN
         self.trade = {}
         self._save_state()
@@ -949,6 +977,7 @@ class MLRunner:
             "trade": self.trade,
             "cooldown_remaining": self.cooldown_remaining,
             "last_candle_count": self.last_candle_count,
+            "consecutive_sl": self.consecutive_sl,
             "saved_at": datetime.now().isoformat(),
         }
         tmp = self.state_file + ".tmp"
@@ -986,6 +1015,7 @@ class MLRunner:
                 self.state = TradeState(saved_state)
                 self.cooldown_remaining = data.get("cooldown_remaining", 0)
                 self.last_candle_count = data.get("last_candle_count", 0)
+                self.consecutive_sl = data.get("consecutive_sl", 0)
 
         except Exception as e:
             print(f"  State recovery failed: {e}")
