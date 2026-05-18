@@ -40,36 +40,38 @@ from config import INSTRUMENT_PROFILES, RISK_FREE_RATE
 
 RUNNER_CONFIGS = {
     "sensex": {
-        "sl_pts":           15,
-        "tp_pts":           25,
-        "runner_ext":       2.16,
-        "retracement_pct":  0.10,
-        "lot2_floor_pts":   10,        # lot2 SL floor above entry after lot1 TP
-        "sl_circuit_breaker": 2,       # pause after N consecutive SLs
-        "circuit_pause_candles": 2,    # extra candles to sit out
-        "min_conf_short":   0.55,
-        "min_conf_long":    0.75,
-        "lot_size":         20,
-        "default_lots":     6,
-        "hold_candles":     9,         # 45 min / 5 min
-        "target_delta":     0.40,
-        "candle_minutes":   5,
+        "sl_pts":                   15,
+        "tp_pts":                   25,
+        "runner_ext":               2.16,
+        "retracement_pct":          0.10,
+        "lot2_floor_pts":           10,
+        "sl_circuit_breaker":       2,
+        "circuit_pause_candles":    2,
+        "counter_trend_pts_limit":  300,
+        "min_conf_short":           0.55,
+        "min_conf_long":            0.75,
+        "lot_size":                 20,
+        "default_lots":             6,
+        "hold_candles":             9,
+        "target_delta":             0.40,
+        "candle_minutes":           5,
     },
     "nifty": {
-        "sl_pts":           8,
-        "tp_pts":           10,
-        "runner_ext":       2.2,
-        "retracement_pct":  None,      # uses fixed TP_TRAIL
-        "lot2_floor_pts":   3,         # lot2 SL floor above entry after lot1 TP
-        "sl_circuit_breaker": 2,       # pause after N consecutive SLs
-        "circuit_pause_candles": 2,    # extra candles to sit out
-        "min_conf_short":   0.55,
-        "min_conf_long":    0.55,
-        "lot_size":         65,
-        "default_lots":     4,
-        "hold_candles":     9,
-        "target_delta":     0.30,
-        "candle_minutes":   5,
+        "sl_pts":                   8,
+        "tp_pts":                   10,
+        "runner_ext":               2.2,
+        "retracement_pct":          None,
+        "lot2_floor_pts":           3,
+        "sl_circuit_breaker":       2,
+        "circuit_pause_candles":    2,
+        "counter_trend_pts_limit":  75,
+        "min_conf_short":           0.55,
+        "min_conf_long":            0.55,
+        "lot_size":                 65,
+        "default_lots":             4,
+        "hold_candles":             9,
+        "target_delta":             0.30,
+        "candle_minutes":           5,
     },
 }
 

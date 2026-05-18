@@ -199,6 +199,15 @@ class Resampler:
             spot_high  = spot_series.max()
             spot_low   = spot_series.min()
 
+            # ── Intra-candle Efficiency Ratio ─────────────────────────────────
+            # ER = |net_move| / sum(|tick-to-tick moves|) within this candle.
+            # ER≈1 = clean directional move; ER≈0 = choppy/mean-reverting.
+            if len(spot_series) >= 2:
+                price_path = spot_series.diff().abs().sum()
+                intra_er = round(float(abs(spot_close - spot_open) / (price_path + 1e-9)), 3)
+            else:
+                intra_er = 0.0
+
             # ── Levels — take CLOSE value of window ───────────────────────────
             last = group[group["timestamp"] == group["timestamp"].max()]
 
@@ -321,6 +330,8 @@ class Resampler:
                 # Theta — buyer cost of carry context
                 "theta_pct":          round(theta_pct_close, 2),
                 "atm_iv":             round(atm_iv_close, 2),
+                # Chop detection
+                "intra_er":           intra_er,
             }
 
         except Exception as e:
@@ -411,6 +422,26 @@ def add_lag_features(df, lags=3):
                 if col in day_df.columns:
                     for lag in range(1, lags + 1):
                         day_df[f"{col}_lag{lag}"] = day_df[col].shift(lag)
+
+            # Rolling 6-candle Efficiency Ratio — net move vs total path length.
+            # ER≈1 = trending session; ER≈0 = choppy session.
+            if "spot_close" in day_df.columns:
+                spot = day_df["spot_close"]
+                net_move = (spot - spot.shift(6)).abs()
+                path_len = spot.diff().abs().rolling(6, min_periods=2).sum()
+                day_df["er_6"] = (net_move / (path_len + 1e-9)).clip(0, 1).round(3)
+
+            # Bias flip count — how many times bias_encoded changed in last 6 candles.
+            # High count = market is indecisive/choppy.
+            if "bias_encoded" in day_df.columns:
+                day_df["bias_flip_count"] = (
+                    day_df["bias_encoded"].diff().ne(0)
+                    .astype(int)
+                    .rolling(6, min_periods=2)
+                    .sum()
+                    .fillna(0)
+                )
+
             day_frames.append(day_df)
         df = pd.concat(day_frames).sort_index()
     else:
