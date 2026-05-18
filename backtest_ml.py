@@ -142,7 +142,7 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
                      stop_pts=15, target_pts=25, slippage_pts=2,
                      hold_minutes=45, min_conf=0.55, runner=False,
                      runner_ext=1.3, runner_be=False, direction_filter=None,
-                     long_conf=None, retracement_pct=None):
+                     long_conf=None, retracement_pct=None, lot2_entry_buffer=None):
     """
     Strict fixed SL/TP simulation on option value.
 
@@ -236,21 +236,29 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
                     # Lot 2 running — update peak for trailing stop
                     if move > lot2_peak:
                         lot2_peak = move
-                    # Compute floor: retracement trail or fixed TP floor
-                    if retracement_pct and lot2_peak > nifty_target:
-                        # Trail at (1-pct)×peak but never below TP
+                    # Resolve floor in spot and option pts
+                    if lot2_entry_buffer is not None:
+                        floor_spot = lot2_entry_buffer / delta
+                        floor_opt  = lot2_entry_buffer
+                        floor_label_base = f"ENTRY+{lot2_entry_buffer}pt"
+                    elif runner_be:
+                        floor_spot = 0.0
+                        floor_opt  = 0.0
+                        floor_label_base = "BE"
+                    else:
+                        floor_spot = nifty_target
+                        floor_opt  = target_pts
+                        floor_label_base = "TP_TRAIL"
+                    # Compute floor: retracement trail or fixed floor
+                    if retracement_pct and lot2_peak > floor_spot:
                         trail_spot = lot2_peak * (1.0 - retracement_pct)
-                        lot2_floor = max(nifty_target, trail_spot)
+                        lot2_floor = max(floor_spot, trail_spot)
                         lot2_floor_pts = lot2_floor * delta
                         lot2_floor_label = f"TRAIL{int(retracement_pct*100)}%"
-                    elif runner_be:
-                        lot2_floor = 0
-                        lot2_floor_pts = 0
-                        lot2_floor_label = "BE"
                     else:
-                        lot2_floor = nifty_target
-                        lot2_floor_pts = target_pts
-                        lot2_floor_label = "TP_TRAIL"
+                        lot2_floor = floor_spot
+                        lot2_floor_pts = floor_opt
+                        lot2_floor_label = floor_label_base
                     if move <= lot2_floor:
                         lot2_pnl = lot2_floor_pts
                         lot2_exit = lot2_floor_label
@@ -463,6 +471,8 @@ def main():
                         help="Slippage in option points per side (default: 2.0)")
     parser.add_argument("--retracement", type=float, default=None,
                         help="Lot2 trailing stop: exit when price retraces this fraction from peak (e.g. 0.30 = 30%%)")
+    parser.add_argument("--lot2-floor", type=float, default=None, dest="lot2_floor",
+                        help="Lot2 SL floor in option pts above entry after lot1 TP (e.g. 10)")
     args = parser.parse_args()
 
     instrument = args.instrument.lower()
@@ -483,6 +493,7 @@ def main():
     last_n_days = args.last_n_days
     slippage_pts = args.slippage
     retracement_pct = args.retracement
+    lot2_floor = args.lot2_floor
 
     print(f"\n{'='*70}")
     print(f"  ML WALK-FORWARD BACKTEST — {instrument.upper()}")
@@ -530,7 +541,8 @@ def main():
                                      hold_minutes=hold_minutes, min_conf=min_conf,
                                      runner=runner, runner_ext=runner_ext,
                                      runner_be=runner_be, direction_filter=direction_filter,
-                                     long_conf=long_conf, retracement_pct=retracement_pct)
+                                     long_conf=long_conf, retracement_pct=retracement_pct,
+                                     lot2_entry_buffer=lot2_floor)
             day_pnl = sum(t["pnl"] for t in trades)
             day_results.append({
                 "date": day["date"], "signals_fired": len(signals),

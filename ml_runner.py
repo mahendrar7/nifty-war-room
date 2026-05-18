@@ -44,6 +44,7 @@ RUNNER_CONFIGS = {
         "tp_pts":           25,
         "runner_ext":       2.16,
         "retracement_pct":  0.10,
+        "lot2_floor_pts":   10,        # lot2 SL floor above entry after lot1 TP
         "min_conf_short":   0.55,
         "min_conf_long":    0.75,
         "lot_size":         20,
@@ -57,6 +58,7 @@ RUNNER_CONFIGS = {
         "tp_pts":           10,
         "runner_ext":       2.2,
         "retracement_pct":  None,      # uses fixed TP_TRAIL
+        "lot2_floor_pts":   3,         # lot2 SL floor above entry after lot1 TP
         "min_conf_short":   0.55,
         "min_conf_long":    0.55,
         "lot_size":         65,
@@ -671,8 +673,8 @@ class MLRunner:
         t["lot1_pnl"] = lot1_pnl
         t["lot1_exit_price"] = lot1_exit_price
 
-        # Place new SL-M for lot2 at TP floor
-        lot2_sl_trigger = round(t["tp_price"], 2)
+        # Place new SL-M for lot2 at entry + floor buffer
+        lot2_sl_trigger = round(t["entry_price"] + self.cfg["lot2_floor_pts"], 2)
         t["lot2_sl_trigger"] = lot2_sl_trigger
         t["lot2_peak_ltp"] = current_ltp
 
@@ -711,9 +713,10 @@ class MLRunner:
         pct = self.cfg["retracement_pct"]
         peak = t["lot2_peak_ltp"]
 
-        # Trail floor = max(TP price, peak × (1 - retracement%))
+        # Trail floor = max(entry + floor buffer, peak × (1 - retracement%))
         trail_price = peak * (1.0 - pct)
-        new_sl = round(max(t["tp_price"], trail_price), 2)
+        floor = t["entry_price"] + self.cfg["lot2_floor_pts"]
+        new_sl = round(max(floor, trail_price), 2)
 
         old_sl = t.get("lot2_sl_trigger", t["tp_price"])
         if new_sl > old_sl + 0.5:

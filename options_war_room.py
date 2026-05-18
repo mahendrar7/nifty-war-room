@@ -1229,7 +1229,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         radar=radar_result,
     )
 
-    return gamma, straddle, bias, trap_prob, count, theta_ctx
+    return gamma, straddle, bias, trap_prob, count, theta_ctx, confidence, trend
 
 
 # =============================================================================
@@ -1473,7 +1473,7 @@ def save_signals(spot, atm, gamma, straddle, bias, confidence, regime, action,
 # CSV LOGGER
 # =============================================================================
 def save_rows(rows, spot, atm, expiry, gamma, straddle, bias, trap_prob, counter,
-              theta_pct=0.0, atm_iv=0.0):
+              theta_pct=0.0, atm_iv=0.0, trend_pts=0, trend_duration=0, bias_confidence=0):
     now = datetime.now().replace(second=0, microsecond=0)
     days_to_exp = (expiry - datetime.now().date()).days
     file_exists = os.path.exists(CSV_FILE)
@@ -1487,6 +1487,7 @@ def save_rows(rows, spot, atm, expiry, gamma, straddle, bias, trap_prob, counter
                 "days_to_expiry", "gamma_pressure", "straddle",
                 "market_bias", "trap_probability", "breakout_cycles",
                 "theta_pct", "atm_iv",
+                "trend_pts", "trend_duration_min", "bias_confidence",
             ])
         for r in rows:
             sym = r["symbol"]
@@ -1497,6 +1498,7 @@ def save_rows(rows, spot, atm, expiry, gamma, straddle, bias, trap_prob, counter
                 r["ltp"], r["oi"], r["volume"], expiry, days_to_exp,
                 gamma, straddle, bias, trap_prob, counter,
                 round(theta_pct, 2), round(atm_iv, 2),
+                round(trend_pts, 1), round(trend_duration, 1), round(bias_confidence, 1),
             ])
 
 
@@ -1685,7 +1687,7 @@ def run_logger():
             )
             hw_stall = detect_hw_stall(state.hw_history) if in_trade else None
 
-            gamma, straddle, bias, trap_prob, counter, theta_ctx = print_dashboard(
+            gamma, straddle, bias, trap_prob, counter, theta_ctx, confidence, trend = print_dashboard(
                 df, spot, atm, momentum_strikes, expiry,
                 hw_momentum=hw_momentum, hw_roc_trend=hw_roc_trend,
                 hw_stall=hw_stall,
@@ -1694,7 +1696,10 @@ def run_logger():
             state.previous_snapshot = df.copy()
             save_rows(rows, spot, atm, expiry, gamma, straddle, bias, trap_prob, counter,
                       theta_pct=theta_ctx["theta_pct"] if theta_ctx else 0.0,
-                      atm_iv=theta_ctx["atm_iv"] if theta_ctx else 0.0)
+                      atm_iv=theta_ctx["atm_iv"] if theta_ctx else 0.0,
+                      trend_pts=trend["move_pts"] if trend and trend.get("trending") else 0,
+                      trend_duration=trend["duration_minutes"] if trend and trend.get("trending") else 0,
+                      bias_confidence=confidence)
 
             consecutive_errors = 0
 

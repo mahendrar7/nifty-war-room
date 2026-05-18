@@ -62,7 +62,8 @@ class Resampler:
                      "option_type","ltp","oi","volume","expiry","days_to_expiry"]
     OPTIONAL_COLS = {"gamma_pressure":0.0,"straddle":0.0,"market_bias":"RANGE",
                      "trap_probability":0,"breakout_cycles":0,
-                     "theta_pct":0.0,"atm_iv":0.0}
+                     "theta_pct":0.0,"atm_iv":0.0,
+                     "trend_pts":0.0,"trend_duration_min":0.0,"bias_confidence":0.0}
 
     def load_csv(self, path_or_paths):
         """
@@ -206,6 +207,9 @@ class Resampler:
             trap_prob_max    = group["trap_probability"].max()       # peak pressure
             breakout_max     = group["breakout_cycles"].max()        # peak count
             bias_close       = last["market_bias"].mode()[0] if not last.empty else "RANGE"
+            trend_pts_close  = last["trend_pts"].mean()       if "trend_pts"       in last.columns else 0.0
+            trend_dur_close  = last["trend_duration_min"].mean() if "trend_duration_min" in last.columns else 0.0
+            bias_conf_close  = last["bias_confidence"].mean() if "bias_confidence" in last.columns else 0.0
             atm_close        = last["atm_strike"].mean()
 
             # ── Flows — use first vs last or sum ──────────────────────────────
@@ -307,6 +311,10 @@ class Resampler:
                 "breakout_cycles":    breakout_max,
                 # Bias encoded as integer
                 "bias_encoded":       {"BULLISH": 1, "BEARISH": -1, "RANGE": 0}.get(bias_close, 0),
+                # Trend context
+                "trend_pts":          round(trend_pts_close, 1),
+                "trend_duration_min": round(trend_dur_close, 1),
+                "bias_confidence":    round(bias_conf_close, 1),
                 # Time
                 "minutes_since_open": minutes_since_open,
                 "days_to_expiry":     days_to_expiry,
