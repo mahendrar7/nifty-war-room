@@ -56,6 +56,7 @@ RUNNER_CONFIGS = {
         "target_delta":             0.40,
         "candle_minutes":           5,
         "slippage_pts":             2,
+        "trail_update_pts":         5,
     },
     "nifty": {
         "sl_pts":                   8,
@@ -74,6 +75,7 @@ RUNNER_CONFIGS = {
         "target_delta":             0.30,
         "candle_minutes":           5,
         "slippage_pts":             1,
+        "trail_update_pts":         2,
     },
 }
 
@@ -221,6 +223,21 @@ class MLRunner:
             print(f"  [PAPER] Cancelled order {order_id}")
             return True
         return cancel_order_safe(self.kite, order_id)
+
+    def _modify_sl_trigger(self, order_id, new_trigger):
+        if self.paper:
+            print(f"  [PAPER] Modified order {order_id} trigger → {new_trigger}")
+            return True
+        try:
+            self.kite.modify_order(
+                variety=self.kite.VARIETY_REGULAR,
+                order_id=order_id,
+                trigger_price=new_trigger,
+            )
+            return True
+        except Exception as e:
+            print(f"  ⚠ modify_order failed: {e}")
+            return False
 
     def _send_alert(self, msg):
         prefix = "📝 [PAPER] " if self.paper else ""
@@ -488,8 +505,8 @@ class MLRunner:
             print("  Cannot get expiry — skipping entry")
             return
 
-        # Select 0.3 delta strike
-        strike, trading_sym = self._select_strike(spot, option_type, expiry)
+        # Select 0.4 delta strike — returns LTP from the bulk quote, no extra fetch needed
+        strike, trading_sym, option_ltp = self._select_strike(spot, option_type, expiry)
         if strike is None:
             print("  Cannot find target delta strike — skipping entry")
             return
@@ -497,18 +514,6 @@ class MLRunner:
         full_symbol = f"{self.exchange}:{trading_sym}"
         qty_per_side = self.cfg["lot_size"] * max(1, self.num_lots // 2)
         total_qty = qty_per_side * 2
-
-        # Get option LTP before entry
-        option_ltp = get_ltp_safe(self.kite, full_symbol)
-        if option_ltp is None:
-            print("  Cannot get option LTP — skipping entry")
-            return
-
-        self._send_alert(
-            f"📡 ML SIGNAL: {direction} conf={confidence:.2f}\n"
-            f"{self.instrument.upper()} spot={spot}\n"
-            f"Entering {trading_sym} qty={total_qty}"
-        )
 
         # Place ENTRY order
         entry_order_id = self._place_order(
@@ -523,12 +528,17 @@ class MLRunner:
             self._send_alert(f"❌ Entry order FAILED for {trading_sym}")
             return
 
-        # Wait for fill and get actual entry price
+        # Poll for fill price — exits as soon as Kite confirms, hard cap at 1s
+        entry_price = None
         if not self.paper:
-            time.sleep(1)
-        entry_price = self._get_fill_price(entry_order_id)
-        if entry_price is None:
-            entry_price = get_ltp_safe(self.kite, full_symbol) or option_ltp
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                entry_price = self._get_fill_price(entry_order_id)
+                if entry_price:
+                    break
+                time.sleep(0.1)
+        if not entry_price:
+            entry_price = option_ltp  # fallback to pre-trade LTP from bulk quote
 
         # Compute SL trigger price
         sl_trigger = round(entry_price - self.cfg["sl_pts"], 2)
@@ -590,9 +600,9 @@ class MLRunner:
         self._save_state()
 
         self._send_alert(
-            f"✅ ENTRY: Bought {total_qty} qty {trading_sym} @ {entry_price}\n"
-            f"SL-M placed @ {sl_trigger} (order {sl_order_id})\n"
-            f"TP1: {tp_price} | TP2: {tp2_price}"
+            f"📡 {direction} conf={confidence:.2f} | spot={spot}\n"
+            f"✅ ENTRY: {total_qty} qty {trading_sym} @ {entry_price}\n"
+            f"SL-M @ {sl_trigger} | TP1: {tp_price} | TP2: {tp2_price}"
         )
         print(f"  ✅ Entry: {trading_sym} @ {entry_price}, SL-M @ {sl_trigger}")
 
@@ -717,10 +727,13 @@ class MLRunner:
 
         lot1_exit_price = current_ltp
         if lot1_order and not self.paper:
-            time.sleep(0.5)
-            fill = self._get_fill_price(lot1_order)
-            if fill:
-                lot1_exit_price = fill
+            deadline = time.time() + 0.5
+            while time.time() < deadline:
+                fill = self._get_fill_price(lot1_order)
+                if fill:
+                    lot1_exit_price = fill
+                    break
+                time.sleep(0.1)
 
         lot1_pnl = round((lot1_exit_price - t["entry_price"]) * t["qty_per_side"])
         t["lot1_pnl"] = lot1_pnl
@@ -772,20 +785,9 @@ class MLRunner:
         new_sl = round(max(floor, trail_price), 2)
 
         old_sl = t.get("lot2_sl_trigger", t["tp_price"])
-        if new_sl > old_sl + 0.5:
-            # Cancel old SL and place new one higher
-            self._cancel_order(t["sl_order_id"])
-            new_order = self._place_order(
-                exchange=self.exchange,
-                tradingsymbol=t["trading_sym"],
-                transaction_type=self.kite.TRANSACTION_TYPE_SELL,
-                quantity=t["qty_per_side"],
-                product=self.kite.PRODUCT_MIS,
-                order_type=self.kite.ORDER_TYPE_SLM,
-                trigger_price=new_sl,
-            )
-            if new_order:
-                t["sl_order_id"] = new_order
+        min_move = self.cfg.get("trail_update_pts", 2)
+        if new_sl > old_sl + min_move:
+            if self._modify_sl_trigger(t["sl_order_id"], new_sl):
                 t["lot2_sl_trigger"] = new_sl
                 self._save_state()
                 print(f"  Trail updated: SL-M moved to {new_sl} (peak={peak:.1f})")
@@ -884,18 +886,8 @@ class MLRunner:
     # ── SL Order Status ────────────────────────────────────────────────────────
 
     def _is_sl_triggered(self, ltp=None):
-        if self.paper:
-            sl = self.trade.get("lot2_sl_trigger", self.trade.get("sl_trigger"))
-            return ltp is not None and sl is not None and ltp <= sl
-        order_id = self.trade.get("sl_order_id")
-        if not order_id:
-            return False
-        try:
-            history = self.kite.order_history(order_id)
-            latest = history[-1]
-            return latest["status"] == "COMPLETE"
-        except Exception:
-            return False
+        sl = self.trade.get("lot2_sl_trigger", self.trade.get("sl_trigger"))
+        return ltp is not None and sl is not None and ltp <= sl
 
     # ── Fill Price ─────────────────────────────────────────────────────────────
 
@@ -981,7 +973,7 @@ class MLRunner:
 
         print(f"  Selected strike {best['strike']} {option_type} "
               f"delta={best['delta']:.3f} ltp={best['ltp']}")
-        return best["strike"], best["trading_sym"]
+        return best["strike"], best["trading_sym"], best["ltp"]
 
     def _find_trading_symbol(self, instruments, strike, option_type, expiry):
         for ins in instruments:
