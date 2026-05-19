@@ -184,6 +184,8 @@ class Resampler:
         result = pd.DataFrame(rows)
         if not result.empty:
             result = result.set_index("timestamp").sort_index()
+        else:
+            result.index = pd.DatetimeIndex([])
         return result
 
     def _extract_features(self, ts, group):
@@ -429,7 +431,11 @@ def add_lag_features(df, lags=3):
                 spot = day_df["spot_close"]
                 net_move = (spot - spot.shift(6)).abs()
                 path_len = spot.diff().abs().rolling(6, min_periods=2).sum()
-                day_df["er_6"] = (net_move / (path_len + 1e-9)).clip(0, 1).round(3)
+                er_6 = (net_move / (path_len + 1e-9)).clip(0, 1).round(3)
+                # fall back to intra_er when fewer than 6 candles of history exist
+                if "intra_er" in day_df.columns:
+                    er_6 = er_6.fillna(day_df["intra_er"])
+                day_df["er_6"] = er_6.fillna(0.5)
 
             # Bias flip count — how many times bias_encoded changed in last 6 candles.
             # High count = market is indecisive/choppy.

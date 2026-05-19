@@ -1620,6 +1620,7 @@ def run_logger():
     consecutive_errors = 0
     MAX_ERRORS = 5
     archived_today = False
+    _warned_events = set()
 
     print("✅ Options Intelligence Terminal Started")
 
@@ -1660,6 +1661,9 @@ def run_logger():
         try:
             # ── Process Telegram commands ─────────────────────────────
             _process_telegram_command()
+
+            from econ_calendar import check_upcoming
+            check_upcoming(_warned_events)
 
             print(f"\nSnapshot: {now.strftime('%H:%M:%S')}")
 
@@ -1887,12 +1891,8 @@ if __name__ == "__main__":
     _start_caffeinate()
     start_hotkey_listener()
 
-    # Start news scraper in background (writes data/market_feed.json every 5 min)
-    try:
-        from news_scraper import scrape_and_save
-        threading.Thread(target=scrape_and_save, args=(True,), daemon=True).start()
-    except Exception as e:
-        print(f"  ⚠ News scraper failed to start: {e}")
+    from econ_calendar import load_and_print
+    load_and_print()
 
     restore_state_from_csv(csv_file=CSV_FILE)
     restore_hw_history(state.hw_history)

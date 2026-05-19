@@ -55,6 +55,7 @@ RUNNER_CONFIGS = {
         "hold_candles":             9,
         "target_delta":             0.40,
         "candle_minutes":           5,
+        "slippage_pts":             2,
     },
     "nifty": {
         "sl_pts":                   8,
@@ -72,6 +73,7 @@ RUNNER_CONFIGS = {
         "hold_candles":             9,
         "target_delta":             0.30,
         "candle_minutes":           5,
+        "slippage_pts":             1,
     },
 }
 
@@ -167,6 +169,7 @@ class MLRunner:
         self.cooldown_remaining = 0
         self.last_candle_count = 0
         self.consecutive_sl = 0
+        self._warned_events = set()
 
         # Paper trading
         self._paper_order_counter = 0
@@ -254,7 +257,8 @@ class MLRunner:
         print(f"  ML RUNNER — {self.instrument.upper()} [{mode_label}]")
         print(f"  Lots: {self.num_lots} ({self.num_lots * self.cfg['lot_size']} qty)")
         print(f"  SL: {self.cfg['sl_pts']}pts | TP: {self.cfg['tp_pts']}pts | "
-              f"TP2: {round(self.cfg['tp_pts'] * self.cfg['runner_ext'], 1)}pts")
+              f"TP2: {round(self.cfg['tp_pts'] * self.cfg['runner_ext'], 1)}pts | "
+              f"Slippage: {self.cfg.get('slippage_pts', 0)}pts (paper SL exits)")
         trail_desc = (f"{int(self.cfg['retracement_pct']*100)}% retracement"
                       if self.cfg['retracement_pct'] else "TP_TRAIL")
         print(f"  Lot2 floor: {trail_desc}")
@@ -277,6 +281,9 @@ class MLRunner:
 
         # Wait until 9:15 before alerting and entering the main loop
         self._wait_until_market_open()
+
+        from econ_calendar import load_and_print
+        load_and_print()
 
         self._send_alert(
             f"🤖 ML Runner started — {self.instrument.upper()} [{mode_label}]\n"
@@ -331,6 +338,22 @@ class MLRunner:
                 break
 
             try:
+                from econ_calendar import check_upcoming, rate_decision_imminent
+                check_upcoming(self._warned_events)
+
+                # Rate decision at T-5: exit position and block entries
+                if rate_decision_imminent():
+                    if self.state in (TradeState.POSITION_OPEN, TradeState.LOT1_EXITED):
+                        print("  ⚠️  RBI rate decision imminent — exiting position")
+                        self._send_alert("⚠️ RBI rate decision in <5min — exiting position, pausing entries")
+                        ltp = get_ltp_safe(self.kite, self.trade["full_symbol"])
+                        if self.state == TradeState.POSITION_OPEN:
+                            self._exit_all_market(ltp or 0, "RBI_EVENT")
+                        else:
+                            self._exit_lot2_market(ltp or 0, "RBI_EVENT")
+                    self._wait_until_next_minute()
+                    continue
+
                 # 1. If in position, monitor exits at 5-second intervals
                 if self.state in (TradeState.POSITION_OPEN, TradeState.LOT1_EXITED):
                     self._monitor_position_fast()
@@ -364,6 +387,11 @@ class MLRunner:
         return now.replace(minute=next_min, second=0, microsecond=0)
 
     def _check_signal(self):
+        from econ_calendar import rate_decision_imminent
+        if rate_decision_imminent():
+            print(f"  [{datetime.now().strftime('%H:%M:%S')}] Entries blocked — RBI rate decision imminent")
+            return
+
         csv_file = self._live_csv()
         if not os.path.exists(csv_file):
             print(f"  ⚠ CSV not found: {csv_file}")
@@ -381,8 +409,9 @@ class MLRunner:
         closed_until = pd.Timestamp(now).floor(f"{self.cfg['candle_minutes']}min")
         candles = candles[candles.index < closed_until]
 
-        if len(candles) < 2:
-            print(f"  ⚠ Not enough candles yet ({len(candles)})")
+        min_candles = 4  # lags=3 → need lags+1 rows to survive dropna
+        if len(candles) < min_candles:
+            print(f"  ⚠ Not enough candles yet ({len(candles)}/{min_candles})")
             return
 
         # Only act on a NEW candle
@@ -404,6 +433,9 @@ class MLRunner:
 
         # Add lag features and predict on latest candle
         candles = add_lag_features(candles)
+        if candles.empty:
+            print(f"  ⚠ No candles after lag feature computation")
+            return
         latest = candles.iloc[-1].to_dict()
         result = self.engine.predict_latest(latest)
 
@@ -603,13 +635,14 @@ class MLRunner:
 
         # Check if SL-M was triggered (order status / paper LTP check)
         if self._is_sl_triggered(ltp):
-            pnl = round((t["sl_trigger"] - t["entry_price"]) * t["total_qty"])
+            sl_exit = round(t["sl_trigger"] - self.cfg.get("slippage_pts", 0), 2) if self.paper else t["sl_trigger"]
+            pnl = round((sl_exit - t["entry_price"]) * t["total_qty"])
             self._send_alert(
                 f"🔴 SL HIT: {t['trading_sym']}\n"
-                f"Entry: {t['entry_price']} → Exit: {t['sl_trigger']}\n"
+                f"Entry: {t['entry_price']} → Exit: {sl_exit}\n"
                 f"P&L: Rs {pnl:+,}"
             )
-            self._log_trade("SL_HIT", t["sl_trigger"], t["total_qty"], pnl=pnl)
+            self._log_trade("SL_HIT", sl_exit, t["total_qty"], pnl=pnl)
             self._close_trade(candles_held, pnl=pnl, exit_type="SL")
             return
 
@@ -631,6 +664,8 @@ class MLRunner:
         # Check if lot2 SL was triggered
         if self._is_sl_triggered(ltp):
             sl_price = t.get("lot2_sl_trigger", t["tp_price"])
+            if self.paper:
+                sl_price = round(sl_price - self.cfg.get("slippage_pts", 0), 2)
             pnl_lot1 = t.get("lot1_pnl", 0)
             pnl_lot2 = round((sl_price - t["entry_price"]) * t["qty_per_side"])
             total_pnl = pnl_lot1 + pnl_lot2
@@ -881,43 +916,56 @@ class MLRunner:
         T = max((expiry - date.today()).days / 365.0, 1 / 365.0)
         r = RISK_FREE_RATE
 
-        # Get all strikes near spot
+        # Collect trading symbols for all strikes near spot
         atm = round(spot / self.strike_step) * self.strike_step
-        strikes_range = [atm + i * self.strike_step
-                         for i in range(-10, 11)]
+        strikes_range = [atm + i * self.strike_step for i in range(-10, 11)]
 
-        # Build candidates with delta
-        candidates = []
+        sym_map = {}  # full_symbol → strike
         for s in strikes_range:
-            # Find tradingsymbol
             tsym = self._find_trading_symbol(instruments, s, option_type, expiry)
             if not tsym:
+                print(f"    Skip {s} {option_type}: no trading symbol")
+                continue
+            sym_map[f"{self.exchange}:{tsym}"] = (s, tsym)
+
+        if not sym_map:
+            print(f"  ⚠ No trading symbols found for {option_type}")
+            return None, None
+
+        # Fetch all LTPs in one bulk quote call
+        try:
+            quotes = self.kite.quote(list(sym_map.keys()))
+        except Exception as e:
+            print(f"  ⚠ Bulk quote failed: {e}")
+            return None, None
+
+        # Build candidates from bulk quote result
+        candidates = []
+        for full_sym, (strike, tsym) in sym_map.items():
+            ltp = quotes.get(full_sym, {}).get("last_price")
+            if not ltp or ltp <= 0:
+                print(f"    Skip {strike} {option_type}: LTP missing in quote response")
                 continue
 
-            full_sym = f"{self.exchange}:{tsym}"
-            ltp = get_ltp_safe(self.kite, full_sym)
-            if ltp is None or ltp <= 0:
-                continue
-
-            # Compute IV → delta
-            iv = implied_vol(spot, s, T, r, ltp, option_type)
+            iv = implied_vol(spot, strike, T, r, ltp, option_type)
             if iv is None or iv <= 0:
+                print(f"    Skip {strike} {option_type}: IV solver failed (ltp={ltp})")
                 continue
 
-            delta = bs_delta(spot, s, T, r, iv, option_type)
+            delta = bs_delta(spot, strike, T, r, iv, option_type)
             candidates.append({
-                "strike": s,
+                "strike":     strike,
                 "trading_sym": tsym,
-                "ltp": ltp,
-                "delta": delta,
-                "abs_delta": abs(delta),
+                "ltp":        ltp,
+                "delta":      delta,
+                "abs_delta":  abs(delta),
             })
 
         if not candidates:
             print(f"  ⚠ No valid candidates found for {option_type} (all failed LTP/IV)")
             return None, None
 
-        # Log all candidates
+        # Log all surviving candidates
         for c in sorted(candidates, key=lambda x: x["strike"]):
             print(f"    Strike {c['strike']} {option_type}: delta={c['delta']:.3f} ltp={c['ltp']}")
 
