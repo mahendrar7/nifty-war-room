@@ -938,18 +938,12 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         )
         cache_result("radar", radar_result)
 
-        # Telegram alert for new setups (only on recompute)
+        # Radar Telegram alerts disabled — console-only
         if radar_result.get("active") and state.active_trade is None:
             r_dir = radar_result["direction"] or "NEUTRAL"
-            r_str = radar_result["strength"]
             _radar_key = f"{r_dir}_{radar_result.get('key_level')}"
             if not hasattr(state, '_last_radar_alert') or state._last_radar_alert != _radar_key:
                 state._last_radar_alert = _radar_key
-                notify(
-                    f"📡 RADAR: {r_dir} setup forming (str:{r_str})\n"
-                    + "\n".join(s["narrative"] for s in radar_result["signals"])
-                    + f"\n👁 {radar_result.get('watch_for', '')}"
-                )
     else:
         radar_result = get_cached("radar", {"active": False, "direction": None,
                                              "strength": 0, "signals": [],
@@ -1000,7 +994,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     trade = None
     sniper_action = sniper_result.get("action", "") if sniper_result else ""
 
-    if sniper_action in ("TAKE TRADE", "SEND IT") and state.active_trade is None:
+    if sniper_action in ("TAKE TRADE", "SEND IT") and state.active_trade is None and sniper_result.get("score", 0) >= 7:
         sniper_dir = sniper_result["direction"]   # "LONG", "SHORT", or "NEUTRAL"
         if sniper_dir != "NEUTRAL":
             trade_direction = "CALL" if sniper_dir == "LONG" else "PUT"
@@ -1048,7 +1042,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
                 f"Stop:₹{t['stop']:.0f} Target:₹{t['target']:.0f}"
             ),
         )
-    elif sniper_action in ("TAKE TRADE", "SEND IT"):
+    elif sniper_action in ("TAKE TRADE", "SEND IT") and sniper_result.get("score", 0) >= 7:
         # Sniper endorsed but no viable strike/sizing — still alert
         icon = "🎯🎯🎯" if sniper_action == "SEND IT" else "🎯"
         sniper_notify(

@@ -25,7 +25,7 @@ from datetime import datetime, date, timedelta
 from scipy.stats import norm as scipy_norm
 
 from kite_interface import get_kite_client
-from notifier import send_telegram_message
+from notifier import send_telegram_message, send_runner_alert
 from ml_engine import (
     MLEngine, Resampler, build_targets, add_lag_features,
     PROBA_THRESHOLD, FORWARD_CANDLES,
@@ -43,7 +43,7 @@ RUNNER_CONFIGS = {
         "sl_pts":                   15,
         "tp_pts":                   25,
         "runner_ext":               2.16,
-        "retracement_pct":          0.10,
+        "retracement_pct":          0.07,
         "lot2_floor_pts":           10,
         "sl_circuit_breaker":       2,
         "circuit_pause_candles":    2,
@@ -57,6 +57,9 @@ RUNNER_CONFIGS = {
         "candle_minutes":           5,
         "slippage_pts":             2,
         "trail_update_pts":         5,
+        "sl_adjust_trigger_pts":    15,
+        "sl_adjust_move_pts":       10,
+        "spot_trigger_pts":         20,    # wait for spot to move 20pts in signal direction before entering
     },
     "nifty": {
         "sl_pts":                   8,
@@ -76,6 +79,9 @@ RUNNER_CONFIGS = {
         "candle_minutes":           5,
         "slippage_pts":             1,
         "trail_update_pts":         2,
+        "sl_adjust_trigger_pts":    15,
+        "sl_adjust_move_pts":       10,
+        "spot_trigger_pts":         None,  # None = enter immediately; set to e.g. 20 to wait for spot confirmation
     },
 }
 
@@ -86,6 +92,7 @@ RUNNER_CONFIGS = {
 
 class TradeState(Enum):
     IDLE = "IDLE"
+    AWAITING_TRIGGER = "AWAITING_TRIGGER"
     POSITION_OPEN = "POSITION_OPEN"
     LOT1_EXITED = "LOT1_EXITED"
     COOLDOWN = "COOLDOWN"
@@ -172,6 +179,8 @@ class MLRunner:
         self.last_candle_count = 0
         self.consecutive_sl = 0
         self._warned_events = set()
+        self.pending_signal = None   # set when AWAITING_TRIGGER
+        self.trigger_expiry = None
 
         # Paper trading
         self._paper_order_counter = 0
@@ -241,7 +250,7 @@ class MLRunner:
 
     def _send_alert(self, msg):
         prefix = "📝 [PAPER] " if self.paper else ""
-        send_telegram_message(prefix + msg)
+        send_runner_alert(prefix + msg)
 
     def _log_trade(self, action, price, qty, pnl=None, notes=""):
         t = self.trade
@@ -376,8 +385,12 @@ class MLRunner:
                     self._monitor_position_fast()
                     continue
 
-                # 2. Check for new ML signal at 5-min boundaries
-                if self.state in (TradeState.IDLE, TradeState.COOLDOWN):
+                # 2a. Waiting for spot confirmation trigger
+                if self.state == TradeState.AWAITING_TRIGGER:
+                    self._check_trigger()
+
+                # 2b. Check for new ML signal at 5-min boundaries
+                elif self.state in (TradeState.IDLE, TradeState.COOLDOWN):
                     self._check_signal()
 
             except Exception as e:
@@ -489,7 +502,56 @@ class MLRunner:
                 return
 
         print(f"\n  📡 ML SIGNAL: {direction} conf={confidence:.2f}")
-        self._enter_trade(direction, confidence)
+
+        trigger_pts = self.cfg.get("spot_trigger_pts")
+        if trigger_pts:
+            spot = self._get_spot()
+            if spot is None:
+                print("  Cannot get spot — entering immediately")
+                self._enter_trade(direction, confidence)
+                return
+            window_mins = 2 * self.cfg["candle_minutes"]   # FORWARD_CANDLES × 5
+            self.pending_signal  = {"direction": direction, "confidence": confidence, "spot": spot}
+            self.trigger_expiry  = datetime.now() + timedelta(minutes=window_mins)
+            self.state           = TradeState.AWAITING_TRIGGER
+            print(f"  ⏳ Awaiting spot trigger: {direction} needs spot to move "
+                  f"{trigger_pts}pts | window={window_mins}min | spot={spot}")
+            self._send_alert(f"⏳ Signal {direction} conf={confidence:.2f} | "
+                             f"Waiting for spot +{trigger_pts}pts @ {spot}")
+        else:
+            self._enter_trade(direction, confidence)
+
+    # ── Spot Trigger Check ─────────────────────────────────────────────────────
+
+    def _check_trigger(self):
+        now     = datetime.now()
+        pending = self.pending_signal
+        trigger_pts = self.cfg.get("spot_trigger_pts", 20)
+
+        if now >= self.trigger_expiry:
+            print(f"  [{now.strftime('%H:%M:%S')}] ⌛ Trigger window expired — signal abandoned")
+            self._send_alert(f"⌛ Trigger expired — {pending['direction']} signal abandoned")
+            self.state          = TradeState.IDLE
+            self.pending_signal = None
+            return
+
+        spot = self._get_spot()
+        if spot is None:
+            return
+
+        signal_spot = pending["spot"]
+        direction   = pending["direction"]
+        move = (spot - signal_spot) * (1 if direction == "LONG" else -1)
+        remaining   = int((self.trigger_expiry - now).total_seconds() / 60)
+        print(f"  [{now.strftime('%H:%M:%S')}] ⏳ {direction} trigger: "
+              f"spot moved {move:+.0f}/{trigger_pts}pts | {remaining}min left")
+
+        if move >= trigger_pts:
+            print(f"  ✅ Spot trigger fired! {direction} +{move:.0f}pts")
+            self._send_alert(f"✅ Trigger fired! {direction} spot +{move:.0f}pts — entering")
+            self.state          = TradeState.IDLE
+            self.pending_signal = None
+            self._enter_trade(direction, pending["confidence"])
 
     # ── Trade Entry ────────────────────────────────────────────────────────────
 
@@ -594,6 +656,7 @@ class MLRunner:
             "sl_order_id":      sl_order_id,
             "candles_held":     0,
             "lot2_peak_ltp":    0.0,
+            "sl_adjusted":      False,
         }
 
         self.state = TradeState.POSITION_OPEN
@@ -642,6 +705,20 @@ class MLRunner:
 
     def _monitor_both_lots(self, ltp, candles_held):
         t = self.trade
+
+        # SL adjustment — once option gains trigger_pts from entry, move SL up
+        if not t.get("sl_adjusted") and \
+                ltp >= t["entry_price"] + self.cfg.get("sl_adjust_trigger_pts", 15):
+            new_sl = round(t["sl_trigger"] + self.cfg.get("sl_adjust_move_pts", 10), 2)
+            if self._modify_sl_trigger(t["sl_order_id"], new_sl):
+                old_sl = t["sl_trigger"]
+                t["sl_trigger"]  = new_sl
+                t["sl_adjusted"] = True
+                self._save_state()
+                print(f"  SL adjusted: {old_sl} → {new_sl} (option up {self.cfg.get('sl_adjust_trigger_pts',15)}pts)")
+                self._send_alert(
+                    f"🔒 SL moved: {old_sl} → {new_sl} | {t['trading_sym']}"
+                )
 
         # Check if SL-M was triggered (order status / paper LTP check)
         if self._is_sl_triggered(ltp):
@@ -695,8 +772,10 @@ class MLRunner:
             if self.cfg["retracement_pct"]:
                 self._update_lot2_trail(ltp)
 
-        # Check TP2 hit
-        if ltp >= t["tp2_price"]:
+        # Check TP2 hit — only when no retracement trail is configured.
+        # When trailing is active, TP2 is a minimum target reference only;
+        # the trail handles the actual exit so we don't cap the runner early.
+        if not self.cfg["retracement_pct"] and ltp >= t["tp2_price"]:
             print(f"  TP2 HIT! LTP={ltp} ≥ TP2={t['tp2_price']}")
             self._exit_lot2_market(ltp, "TP2")
             return
