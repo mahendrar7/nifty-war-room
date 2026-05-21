@@ -60,12 +60,13 @@ RUNNER_CONFIGS = {
         "sl_adjust_trigger_pts":    15,
         "sl_adjust_move_pts":       10,
         "spot_trigger_pts":         20,    # wait for spot to move 20pts in signal direction before entering
+        "skip_expiry_day":          True,  # block all entries on weekly expiry day
     },
     "nifty": {
         "sl_pts":                   8,
         "tp_pts":                   10,
         "runner_ext":               2.2,
-        "retracement_pct":          None,
+        "retracement_pct":          0.07,
         "lot2_floor_pts":           3,
         "sl_circuit_breaker":       2,
         "circuit_pause_candles":    2,
@@ -82,6 +83,7 @@ RUNNER_CONFIGS = {
         "sl_adjust_trigger_pts":    15,
         "sl_adjust_move_pts":       10,
         "spot_trigger_pts":         None,  # None = enter immediately; set to e.g. 20 to wait for spot confirmation
+        "skip_expiry_day":          False, # block all entries on weekly expiry day
     },
 }
 
@@ -421,6 +423,12 @@ class MLRunner:
         if rate_decision_imminent():
             print(f"  [{datetime.now().strftime('%H:%M:%S')}] Entries blocked — RBI rate decision imminent")
             return
+
+        if self.cfg.get("skip_expiry_day"):
+            expiry = self._get_nearest_expiry()
+            if expiry == date.today():
+                print(f"  [{datetime.now().strftime('%H:%M:%S')}] Entries blocked — expiry day ({expiry})")
+                return
 
         csv_file = self._live_csv()
         if not os.path.exists(csv_file):
