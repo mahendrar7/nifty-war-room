@@ -28,7 +28,7 @@ from kite_interface import get_kite_client
 from notifier import send_telegram_message, send_runner_alert
 from ml_engine import (
     MLEngine, Resampler, build_targets, add_lag_features,
-    PROBA_THRESHOLD, FORWARD_CANDLES,
+    PROBA_THRESHOLD, FORWARD_CANDLES, FeedbackLedger,
 )
 from gamma_engine import _bs_d1, implied_vol
 from config import INSTRUMENT_PROFILES, RISK_FREE_RATE
@@ -201,6 +201,12 @@ class MLRunner:
 
         self.resampler = Resampler(candle_minutes=self.cfg["candle_minutes"])
 
+        # Feedback ledger — records SL/TP outcomes for EOD-weighted retraining
+        self._feedback = FeedbackLedger(
+            path=f"data/ml_feedback_{self.instrument}.csv"
+        )
+        self._pending_signal_ts = None   # candle_ts of the signal that opened current trade
+
         # State file for crash recovery
         self.state_file = f"data/ml_runner_state_{self.instrument}.json"
 
@@ -345,7 +351,21 @@ class MLRunner:
         candles = add_lag_features(candles)
         self.engine.x_points = x_pts
         self.engine.dataset = candles
-        self.engine.train()
+
+        # Apply feedback weights if ledger has any outcomes
+        fb_weights = None
+        if not self._feedback._df.empty:
+            ts_list   = candles.index.tolist()
+            date_list = (candles["trading_date"].tolist()
+                         if "trading_date" in candles.columns
+                         else [""] * len(ts_list))
+            fb_weights = self._feedback.get_sample_weights(ts_list, date_list)
+            n_naughty = int((fb_weights >= 4.0).sum())
+            n_nice    = int((fb_weights == 3.0).sum())
+            print(f"  📊 Feedback weights: {n_naughty} NAUGHTY × {n_nice} NICE "
+                  f"(from {len(self._feedback._df)} recorded outcomes)")
+
+        self.engine.train(feedback_weights=fb_weights)
         print(f"  ✅ 5-min model trained and saved")
 
     # ── Main Loop ──────────────────────────────────────────────────────────────
@@ -510,6 +530,11 @@ class MLRunner:
                 return
 
         print(f"\n  📡 ML SIGNAL: {direction} conf={confidence:.2f}")
+
+        # Track signal candle timestamp for feedback recording at trade close
+        self._pending_signal_ts = candles.index[-1]
+        self._pending_signal_dir = result["signal"]
+        self._pending_confidence = confidence
 
         trigger_pts = self.cfg.get("spot_trigger_pts")
         if trigger_pts:
@@ -952,6 +977,26 @@ class MLRunner:
             "pnl": pnl,
             "exit_type": exit_type,
         })
+
+        # Record outcome to feedback ledger for next EOD retrain
+        if self._pending_signal_ts is not None:
+            outcome = ("correct" if exit_type in ("TP", "TP2", "TRAIL") and pnl > 0
+                       else "wrong" if exit_type == "SL"
+                       else "neutral")
+            try:
+                self._feedback.record_trade_outcome(
+                    candle_ts=self._pending_signal_ts,
+                    signal=self._pending_signal_dir,
+                    confidence=self._pending_confidence,
+                    exit_type=exit_type,
+                    outcome=outcome,
+                    trading_date=str(self._pending_signal_ts.date()),
+                    entry_ltp=self.trade.get("entry_price"),
+                )
+            except Exception as e:
+                print(f"  ⚠ Feedback record failed: {e}")
+            self._pending_signal_ts = None
+
         self.cooldown_remaining = max(1, candles_held)
 
         if exit_type == "SL":
@@ -1167,7 +1212,23 @@ class MLRunner:
         # Archive trade log on expiry day
         self._archive_trade_log_on_expiry()
 
-        # Retrain model for tomorrow
+        # Refresh feedback ledger from full historical options log
+        print("\n  EOD — refreshing feedback ledger...")
+        try:
+            from backtest_feedback_loop import build_feedback_ledger
+            build_feedback_ledger(
+                instrument=self.instrument,
+                candle_minutes=self.cfg["candle_minutes"],
+                verbose=True,
+            )
+            # Reload the refreshed ledger so _retrain_model picks up new weights
+            self._feedback = FeedbackLedger(
+                path=f"data/ml_feedback_{self.instrument}.csv"
+            )
+        except Exception as e:
+            print(f"  Feedback refresh failed: {e} — retraining without feedback")
+
+        # Retrain model for tomorrow (applies refreshed feedback weights)
         print("\n  EOD — retraining 5-min model...")
         try:
             self._retrain_model()

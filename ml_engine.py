@@ -880,16 +880,16 @@ NEUTRAL_WEIGHT = 1.0   # no-signal candles — normal weight
 
 class FeedbackLedger:
     """
-    Records every ML prediction and checks outcomes 2 candles (30 min) later.
-    Feeds outcome-weighted sample weights back into retraining so the model
-    learns more from its mistakes and reinforces its correct calls.
+    Tracks ML prediction outcomes and feeds sample weights back into retraining.
 
-    Lifecycle per prediction:
-        1. record_prediction()  — called at candle boundary when signal fires
-        2. check_outcomes()     — called every minute; resolves any pending
-                                  predictions whose 30-min window has closed
-        3. get_sample_weights() — called during retrain; returns per-candle
-                                  weight multipliers based on past outcomes
+    Two ways to record outcomes:
+      record_trade_outcome() — preferred path; called when a trade closes
+                               with the actual SL/TP exit type.  Works for both
+                               live trading (ml_runner) and backtest replay.
+      record_prediction() + check_outcomes() — legacy spot-direction path kept
+                               for backward compat; not used by ml_runner.
+
+    get_sample_weights() is unchanged and works with either recording path.
     """
 
     def __init__(self, path=FEEDBACK_FILE):
@@ -920,6 +920,40 @@ class FeedbackLedger:
         os.makedirs("data", exist_ok=True)
         self._df.to_csv(self.path, index=False)
 
+    def record_trade_outcome(self, candle_ts, signal, confidence,
+                              exit_type, outcome, trading_date,
+                              entry_ltp=None, exit_ltp=None):
+        """
+        Record actual trade outcome (SL/TP) directly — no spot-direction guessing.
+
+        exit_type: "SL", "TP", "TP2", "TRAIL", "TIME", "EOD"
+        outcome  : "correct" (TP hit), "wrong" (SL hit), "neutral" (TIME/EOD)
+
+        Called by ml_runner._close_trade() and backtest_feedback_loop.run_day().
+        """
+        if signal == 0:
+            return
+
+        verdict = {"correct": "🎉 NICE", "wrong": "👿 NAUGHTY"}.get(outcome, "➖ NEUTRAL")
+        row = {
+            "candle_ts":      candle_ts,
+            "signal":         int(signal),
+            "confidence":     float(confidence),
+            "spot_at_signal": float(entry_ltp) if entry_ltp is not None else 0.0,
+            "x_points":       float(exit_ltp)  if exit_ltp  is not None else 0.0,
+            "outcome":        outcome,
+            "actual_move":    0.0,
+            "verdict":        verdict,
+            "resolved_at":    str(exit_type),
+            "trading_date":   str(trading_date),
+        }
+        new_row = pd.DataFrame([row])
+        if self._df.empty:
+            self._df = new_row
+        else:
+            self._df = pd.concat([self._df, new_row], ignore_index=True)
+        self._save()
+
     def record_prediction(self, candle_ts, result, spot):
         """
         Store a prediction immediately when it fires.
@@ -936,10 +970,10 @@ class FeedbackLedger:
             "candle_ts":      candle_ts,
         }
 
-    def check_outcomes(self, current_spot, current_time):
+    def check_outcomes(self, current_spot, current_time, window_minutes=10):
         """
         Called every minute. Resolves any pending predictions whose
-        30-minute window (2 × 15-min candles) has elapsed.
+        window has elapsed.  Default 10 min = 2 × 5-min candles (runner cadence).
         Returns list of newly resolved verdicts for dashboard display.
         """
         resolved = []
@@ -948,8 +982,7 @@ class FeedbackLedger:
         for candle_ts, pred in self.pending.items():
             elapsed = (current_time - candle_ts).total_seconds() / 60
 
-            # Wait for full 30-minute window to close
-            if elapsed < 30:
+            if elapsed < window_minutes:
                 continue
 
             signal         = pred["signal"]
@@ -981,9 +1014,11 @@ class FeedbackLedger:
                 "trading_date":   candle_ts.date(),
             }
 
-            self._df = pd.concat(
-                [self._df, pd.DataFrame([row])], ignore_index=True
-            )
+            new_row = pd.DataFrame([row])
+            if self._df.empty:
+                self._df = new_row
+            else:
+                self._df = pd.concat([self._df, new_row], ignore_index=True)
             self._save()
             resolved.append(row)
             to_remove.append(candle_ts)
