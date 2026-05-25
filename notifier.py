@@ -1,10 +1,14 @@
+import os
 import requests
+from dotenv import load_dotenv
 
-BOT_TOKEN = "7702090637:AAHTv7qUNXTLaKZ4eO31Hwn_jZ9xkQY--vQ"
-CHAT_ID = "1476855939"
+load_dotenv()
 
-RUNNER_BOT_TOKEN = "8841093148:AAE9g4LPSJcP6ckOAw6356Er84Si6f4sXfo"
-RUNNER_CHAT_ID = "-1003886854270"
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+RUNNER_BOT_TOKEN = os.getenv("TELEGRAM_RUNNER_BOT_TOKEN", "")
+RUNNER_CHAT_ID = os.getenv("TELEGRAM_RUNNER_CHAT_ID", "")
 
 def _post(token, chat_id, message):
     url = f"https://api.telegram.org/bot{token}/sendMessage"

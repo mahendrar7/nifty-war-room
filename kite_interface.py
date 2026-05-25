@@ -4,11 +4,13 @@ import webbrowser
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+from dotenv import load_dotenv
 from kiteconnect import KiteConnect
 
-# Configuration
-API_KEY = "vgq6rzgyww3lzbiz"
-API_SECRET = "zx0v9nqvpwzlf1b34vwjpi1o5201w62p"
+load_dotenv()
+
+API_KEY = os.getenv("KITE_API_KEY", "")
+API_SECRET = os.getenv("KITE_API_SECRET", "")
 ACCESS_TOKEN_PATH = "access_token.txt"
 PORT = 8080  # Port 80 often requires admin; 8080 is safer for local dev
 
