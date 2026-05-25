@@ -564,6 +564,21 @@ class MLRunner:
         if now >= self.trigger_expiry:
             print(f"  [{now.strftime('%H:%M:%S')}] ⌛ Trigger window expired — signal abandoned")
             self._send_alert(f"⌛ Trigger expired — {pending['direction']} signal abandoned")
+            # Record as wrong: model was confident but spot never confirmed direction
+            if self._pending_signal_ts is not None:
+                try:
+                    self._feedback.record_trade_outcome(
+                        candle_ts=self._pending_signal_ts,
+                        signal=self._pending_signal_dir,
+                        confidence=self._pending_confidence,
+                        exit_type="TRIGGER_EXPIRED",
+                        outcome="wrong",
+                        trading_date=str(self._pending_signal_ts.date()),
+                        entry_ltp=None,
+                    )
+                except Exception as e:
+                    print(f"  ⚠ Feedback record (abandoned) failed: {e}")
+                self._pending_signal_ts = None
             self.state          = TradeState.IDLE
             self.pending_signal = None
             return
