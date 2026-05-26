@@ -116,6 +116,8 @@ def predict_day(model, feature_cols, x_points, test_candles, instrument="nifty")
     trend_pts_vals  = df["trend_pts"].values       if "trend_pts"    in df.columns else np.zeros(len(X))
     bias_enc_vals   = df["bias_encoded"].values    if "bias_encoded" in df.columns else np.zeros(len(X))
 
+    session_open_spot = float(spots[0]) if len(spots) > 0 else 0.0
+
     results = []
     for i in range(len(X)):
         pred_class = np.argmax(probas[i])
@@ -125,17 +127,21 @@ def predict_day(model, feature_cols, x_points, test_candles, instrument="nifty")
         if confidence < PROBA_THRESHOLD:
             signal = 0
 
+        session_high_at_signal = float(spots[:i + 1].max())
+
         results.append({
-            "timestamp":   timestamps[i],
-            "spot":        spots[i],
-            "signal":      signal,
-            "actual":      y_true[i],
-            "confidence":  confidence,
-            "p_bearish":   probas[i][0],
-            "p_no_move":   probas[i][1],
-            "p_bullish":   probas[i][2],
-            "trend_pts":   float(trend_pts_vals[i]),
-            "bias_encoded": int(bias_enc_vals[i]),
+            "timestamp":              timestamps[i],
+            "spot":                   spots[i],
+            "signal":                 signal,
+            "actual":                 y_true[i],
+            "confidence":             confidence,
+            "p_bearish":              probas[i][0],
+            "p_no_move":              probas[i][1],
+            "p_bullish":              probas[i][2],
+            "trend_pts":              float(trend_pts_vals[i]),
+            "bias_encoded":           int(bias_enc_vals[i]),
+            "session_open":           session_open_spot,
+            "session_high_at_signal": session_high_at_signal,
         })
 
     return results
@@ -151,7 +157,8 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
                      runner_ext=1.3, runner_be=False, direction_filter=None,
                      long_conf=None, retracement_pct=None, lot2_entry_buffer=None,
                      sl_circuit_breaker=None, circuit_pause_candles=2,
-                     counter_trend_pts_limit=None):
+                     counter_trend_pts_limit=None,
+                     session_disp_long_block_pts=None):
     """
     Strict fixed SL/TP simulation on option value.
 
@@ -198,6 +205,15 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
                              (direction == "LONG"  and bias_enc_val == -1)
                 if is_counter:
                     continue
+
+        # Session displacement gate: block LONGs grinding into a falling session.
+        # Fires only when spot is BOTH >N pts below session high AND below session open.
+        if session_disp_long_block_pts and direction == "LONG":
+            session_open_s = pred.get("session_open", pred["spot"])
+            session_high_s = pred.get("session_high_at_signal", pred["spot"])
+            drop_from_high = session_high_s - pred["spot"]
+            if drop_from_high > session_disp_long_block_pts and pred["spot"] < session_open_s:
+                continue
 
         entry_spot = pred["spot"]
 
@@ -505,6 +521,8 @@ def main():
                         help="Lot2 SL floor in option pts above entry after lot1 TP (e.g. 10)")
     parser.add_argument("--ct-limit", type=float, default=None, dest="ct_limit",
                         help="Counter-trend gate: block signals opposing trend when trend_pts > N (e.g. 300)")
+    parser.add_argument("--session-disp-long-block", type=float, default=None, dest="session_disp_long_block",
+                        help="Block LONG when spot is >N pts below session high AND below session open (e.g. 200)")
     parser.add_argument("--exclude", nargs="+", default=None, metavar="COL",
                         help="Extra feature columns to exclude from training (and their _lag1/2/3 variants)")
     args = parser.parse_args()
@@ -529,6 +547,7 @@ def main():
     retracement_pct = args.retracement
     lot2_floor = args.lot2_floor
     ct_limit   = args.ct_limit
+    session_disp_long_block = args.session_disp_long_block
     # Expand --exclude to also cover _lag1/2/3 variants automatically
     extra_exclude = None
     if args.exclude:
@@ -585,7 +604,8 @@ def main():
                                      runner_be=runner_be, direction_filter=direction_filter,
                                      long_conf=long_conf, retracement_pct=retracement_pct,
                                      lot2_entry_buffer=lot2_floor,
-                                     counter_trend_pts_limit=ct_limit)
+                                     counter_trend_pts_limit=ct_limit,
+                                     session_disp_long_block_pts=session_disp_long_block)
             day_pnl = sum(t["pnl"] for t in trades)
             day_results.append({
                 "date": day["date"], "signals_fired": len(signals),
@@ -673,7 +693,8 @@ def main():
                                  runner_be=runner_be, direction_filter=direction_filter,
                                  long_conf=long_conf, retracement_pct=retracement_pct,
                                  lot2_entry_buffer=lot2_floor,
-                                 counter_trend_pts_limit=ct_limit)
+                                 counter_trend_pts_limit=ct_limit,
+                                 session_disp_long_block_pts=session_disp_long_block)
         day_pnl = sum(t["pnl"] for t in trades)
 
         day_result = {
