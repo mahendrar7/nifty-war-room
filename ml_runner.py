@@ -62,6 +62,8 @@ RUNNER_CONFIGS = {
         "spot_trigger_pts":         20,    # wait for spot to move 20pts in signal direction before entering
         "skip_expiry_day":          True,  # block all entries on weekly expiry day
         "session_disp_long_block_pts": 200, # block LONG when spot is this far below session high AND below session open
+        "daily_loss_limit":            15000, # stop new entries for the day once closed PnL hits -Rs 15,000
+        "paper_starting_margin":       60000, # simulated starting margin for paper mode
     },
     "nifty": {
         "sl_pts":                   8,
@@ -86,6 +88,8 @@ RUNNER_CONFIGS = {
         "spot_trigger_pts":         None,  # None = enter immediately; set to e.g. 20 to wait for spot confirmation
         "skip_expiry_day":          False, # block all entries on weekly expiry day
         "session_disp_long_block_pts": None, # disabled for NIFTY
+        "daily_loss_limit":            None, # disabled for NIFTY
+        "paper_starting_margin":       None, # disabled for NIFTY
     },
 }
 
@@ -121,6 +125,8 @@ def bs_delta(S, K, T, r, sigma, option_type="CE"):
 
 MAX_RETRIES = 5
 
+_MARGIN_ERRORS = ("insufficient", "margin", "funds", "credit")
+
 def place_order_safe(kite, **kwargs):
     for attempt in range(MAX_RETRIES):
         try:
@@ -128,6 +134,10 @@ def place_order_safe(kite, **kwargs):
             return order_id
         except Exception as e:
             err = str(e)
+            if any(kw in err.lower() for kw in _MARGIN_ERRORS):
+                print(f"  ORDER FAILED (margin): {err}")
+                send_telegram_message(f"🚨 MARGIN INSUFFICIENT: {err}\nParams: {kwargs}")
+                return None
             if attempt < MAX_RETRIES - 1:
                 wait = 2 ** attempt
                 print(f"  Order attempt {attempt+1} failed: {err} — retrying in {wait}s")
@@ -182,6 +192,9 @@ class MLRunner:
         self.cooldown_remaining = 0
         self.last_candle_count = 0
         self.consecutive_sl = 0
+        self.session_pnl = 0.0
+        self.available_margin = 0.0
+        self.day_suspended = False
         self._warned_events = set()
         self.pending_signal = None   # set when AWAITING_TRIGGER
         self.trigger_expiry = None
@@ -314,6 +327,7 @@ class MLRunner:
 
         # Restore state from disk if we crashed mid-trade
         self._load_state()
+        self._init_margin()
 
         # Wait until 9:15 before alerting and entering the main loop
         self._wait_until_market_open()
@@ -451,6 +465,16 @@ class MLRunner:
             if expiry == date.today():
                 print(f"  [{datetime.now().strftime('%H:%M:%S')}] Entries blocked — expiry day ({expiry})")
                 return
+
+        if self.day_suspended:
+            print(f"  [{datetime.now().strftime('%H:%M:%S')}] Day suspended — insufficient margin for minimum lots")
+            return
+
+        daily_limit = self.cfg.get("daily_loss_limit")
+        if daily_limit and self.session_pnl <= -daily_limit:
+            print(f"  [{datetime.now().strftime('%H:%M:%S')}] Daily loss limit reached "
+                  f"(session PnL Rs {self.session_pnl:,.0f}) — no new entries today")
+            return
 
         csv_file = self._live_csv()
         if not os.path.exists(csv_file):
@@ -639,8 +663,42 @@ class MLRunner:
             return
 
         full_symbol = f"{self.exchange}:{trading_sym}"
-        qty_per_side = self.cfg["lot_size"] * max(1, self.num_lots // 2)
-        total_qty = qty_per_side * 2
+
+        # Lot-stepping: try configured lots, step down by 2 if margin is insufficient.
+        # Start from the nearest even number at or below configured lots so the
+        # sequence always lands on even values and reaches 2 regardless of config.
+        lot_size    = self.cfg["lot_size"]
+        start_lots  = self.num_lots if self.num_lots % 2 == 0 else self.num_lots - 1
+        actual_lots = None
+        for try_lots in range(start_lots, 1, -2):
+            # Cost = premium for all lots + brokerage (entry order) + taxes
+            cost = option_ltp * lot_size * try_lots + 20 + 12 * try_lots
+            if self.available_margin >= cost:
+                actual_lots = try_lots
+                break
+
+        if actual_lots is None:
+            min_cost = option_ltp * lot_size * 2 + 20 + 24
+            print(f"  Margin too low for 2 lots — need Rs {min_cost:,.0f}, "
+                  f"have Rs {self.available_margin:,.0f} — suspending for the day")
+            self._send_alert(
+                f"🚨 Margin insufficient for 2 lots (have Rs {self.available_margin:,.0f}, "
+                f"need Rs {min_cost:,.0f}) — no more entries today"
+            )
+            self.day_suspended = True
+            self._save_state()
+            return
+
+        if actual_lots != self.num_lots:
+            print(f"  ⚠ Margin reduced: {actual_lots} lots (configured {self.num_lots}) "
+                  f"— margin Rs {self.available_margin:,.0f}")
+            self._send_alert(
+                f"⚠️ Low margin — entering {actual_lots} lots (configured: {self.num_lots})\n"
+                f"Available: Rs {self.available_margin:,.0f}"
+            )
+
+        qty_per_side = lot_size * max(1, actual_lots // 2)
+        total_qty    = qty_per_side * 2
 
         # Place ENTRY order
         entry_order_id = self._place_order(
@@ -652,7 +710,11 @@ class MLRunner:
             order_type=self.kite.ORDER_TYPE_MARKET,
         )
         if entry_order_id is None:
-            self._send_alert(f"❌ Entry order FAILED for {trading_sym}")
+            self._send_alert(f"❌ Entry order FAILED for {trading_sym} — suspending for the day")
+            # Drive session_pnl past the daily limit so _check_signal blocks further entries
+            daily_limit = self.cfg.get("daily_loss_limit", 0)
+            self.session_pnl = -(daily_limit + 1) if daily_limit else self.session_pnl
+            self._save_state()
             return
 
         # Poll for fill price — exits as soon as Kite confirms, hard cap at 1s
@@ -722,6 +784,7 @@ class MLRunner:
             "candles_held":     0,
             "lot2_peak_ltp":    0.0,
             "sl_adjusted":      False,
+            "actual_lots":      actual_lots,
         }
 
         self.state = TradeState.POSITION_OPEN
@@ -1009,6 +1072,14 @@ class MLRunner:
             "pnl": pnl,
             "exit_type": exit_type,
         })
+        self.session_pnl += pnl
+
+        # Deduct brokerage + taxes from tracked margin.
+        # SL hit = 2 executed orders (entry + SL-M). All other exits = 3 (entry + lot1 + lot2).
+        actual_lots = self.trade.get("actual_lots", self.num_lots)
+        num_orders  = 2 if exit_type == "SL" else 3
+        charges     = 20 * num_orders + 12 * actual_lots
+        self.available_margin += pnl - charges
 
         # Record outcome to feedback ledger for next EOD retrain
         if self._pending_signal_ts is not None:
@@ -1177,6 +1248,25 @@ class MLRunner:
 
     # ── State Persistence ──────────────────────────────────────────────────────
 
+    def _init_margin(self):
+        """Fetch available margin at session start. Live: from Kite. Paper: from config."""
+        if not self.paper:
+            try:
+                m = self.kite.margins()
+                self.available_margin = float(
+                    m.get("equity", {}).get("available", {}).get("live_balance", 0)
+                )
+                print(f"  Live margin: Rs {self.available_margin:,.0f}")
+            except Exception as e:
+                print(f"  ⚠ Could not fetch margin ({e}) — margin check disabled")
+                self.available_margin = float("inf")
+        else:
+            paper_margin = self.cfg.get("paper_starting_margin")
+            if paper_margin and self.available_margin == 0.0:
+                # Only set from config on a fresh start; preserve restored value on restarts
+                self.available_margin = float(paper_margin)
+            print(f"  Paper margin: Rs {self.available_margin:,.0f}")
+
     def _save_state(self):
         data = {
             "state": self.state.value,
@@ -1184,7 +1274,10 @@ class MLRunner:
             "cooldown_remaining": self.cooldown_remaining,
             "last_candle_count": self.last_candle_count,
             "consecutive_sl": self.consecutive_sl,
-            "saved_at": datetime.now().isoformat(),
+            "session_pnl":       self.session_pnl,
+            "available_margin":  self.available_margin,
+            "day_suspended":     self.day_suspended,
+            "saved_at":          datetime.now().isoformat(),
         }
         tmp = self.state_file + ".tmp"
         with open(tmp, "w") as f:
@@ -1222,6 +1315,20 @@ class MLRunner:
                 self.cooldown_remaining = data.get("cooldown_remaining", 0)
                 self.last_candle_count = data.get("last_candle_count", 0)
                 self.consecutive_sl = data.get("consecutive_sl", 0)
+
+            # Restore session PnL and paper margin only if state file is from today
+            saved_date = data.get("saved_at", "")[:10]
+            if saved_date == date.today().isoformat():
+                self.session_pnl    = data.get("session_pnl", 0.0)
+                self.day_suspended  = data.get("day_suspended", False)
+                # Live margin is always re-fetched from Kite in _init_margin;
+                # paper margin must be restored from state so losses carry across restarts.
+                if self.paper:
+                    self.available_margin = data.get("available_margin", 0.0)
+            else:
+                self.session_pnl   = 0.0
+                self.day_suspended = False
+                # available_margin reset handled by _init_margin on next startup
 
         except Exception as e:
             print(f"  State recovery failed: {e}")
