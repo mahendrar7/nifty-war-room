@@ -524,8 +524,13 @@ class MLEngine:
 
     # ── Feature columns ───────────────────────────────────────────────────────
     def _get_feature_cols(self, df):
-        exclude = {"target", "future_high", "future_low",
-                   "spot_open", "spot_high", "spot_low", "trading_date"}
+        exclude = {
+            "target", "future_high", "future_low",
+            "spot_open", "spot_high", "spot_low", "trading_date",
+            # Near-constant in practice (capped at 30 min, 73% = 0): fully
+            # redundant with trend_pts so XGBoost never splits on it.
+            "trend_duration_min",
+        }
         return [c for c in df.columns if c not in exclude]
 
     # ── Train ─────────────────────────────────────────────────────────────────

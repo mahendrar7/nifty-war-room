@@ -56,7 +56,7 @@ def load_all_days(instrument="nifty", candle_minutes=15):
     return day_candles
 
 
-def train_model(train_df, instrument="nifty"):
+def train_model(train_df, instrument="nifty", extra_exclude=None):
     """Train XGBoost on provided dataframe, return model + metadata."""
     df, x_points = build_targets(train_df.copy(), instrument=instrument)
     df = add_lag_features(df)
@@ -66,6 +66,8 @@ def train_model(train_df, instrument="nifty"):
 
     exclude = {"target", "future_high", "future_low",
                "spot_open", "spot_high", "spot_low", "trading_date"}
+    if extra_exclude:
+        exclude |= set(extra_exclude)
     feature_cols = [c for c in df.columns if c not in exclude]
 
     X = df[feature_cols].values
@@ -503,6 +505,8 @@ def main():
                         help="Lot2 SL floor in option pts above entry after lot1 TP (e.g. 10)")
     parser.add_argument("--ct-limit", type=float, default=None, dest="ct_limit",
                         help="Counter-trend gate: block signals opposing trend when trend_pts > N (e.g. 300)")
+    parser.add_argument("--exclude", nargs="+", default=None, metavar="COL",
+                        help="Extra feature columns to exclude from training (and their _lag1/2/3 variants)")
     args = parser.parse_args()
 
     instrument = args.instrument.lower()
@@ -525,6 +529,13 @@ def main():
     retracement_pct = args.retracement
     lot2_floor = args.lot2_floor
     ct_limit   = args.ct_limit
+    # Expand --exclude to also cover _lag1/2/3 variants automatically
+    extra_exclude = None
+    if args.exclude:
+        extra_exclude = set(args.exclude)
+        for col in args.exclude:
+            for lag in (1, 2, 3):
+                extra_exclude.add(f"{col}_lag{lag}")
 
     print(f"\n{'='*70}")
     print(f"  ML WALK-FORWARD BACKTEST — {instrument.upper()}")
@@ -552,7 +563,7 @@ def main():
             sys.exit(1)
         split = len(day_data) - last_n_days
         train_df = pd.concat([d["candles"] for d in day_data[:split]])
-        val_model, val_features, val_xpts, _ = train_model(train_df, instrument)
+        val_model, val_features, val_xpts, _ = train_model(train_df, instrument, extra_exclude)
         if val_model is None:
             print("Training failed.")
             sys.exit(1)
@@ -635,7 +646,7 @@ def main():
             n_train_days = day_idx
             n_train_candles = len(train_df)
 
-            model, feature_cols, x_points, label_map = train_model(train_df, instrument)
+            model, feature_cols, x_points, label_map = train_model(train_df, instrument, extra_exclude)
             if model is None:
                 print(f"  {date}: training failed (not enough data/classes)")
                 continue

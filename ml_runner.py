@@ -61,6 +61,7 @@ RUNNER_CONFIGS = {
         "sl_adjust_move_pts":       10,
         "spot_trigger_pts":         20,    # wait for spot to move 20pts in signal direction before entering
         "skip_expiry_day":          True,  # block all entries on weekly expiry day
+        "session_disp_long_block_pts": 200, # block LONG when spot is this far below session high AND below session open
     },
     "nifty": {
         "sl_pts":                   8,
@@ -84,6 +85,7 @@ RUNNER_CONFIGS = {
         "sl_adjust_move_pts":       10,
         "spot_trigger_pts":         None,  # None = enter immediately; set to e.g. 20 to wait for spot confirmation
         "skip_expiry_day":          False, # block all entries on weekly expiry day
+        "session_disp_long_block_pts": None, # disabled for NIFTY
     },
 }
 
@@ -527,6 +529,21 @@ class MLRunner:
                          (direction == "LONG"  and bias_enc == -1)
             if is_counter:
                 print(f"  Signal {direction} blocked — counter-trend in {trend_pts:.0f}pt trend")
+                return
+
+        # Session displacement gate: block LONGs when session is grinding lower.
+        # Fires only when spot is BOTH (a) >N pts below session high AND (b) below session open.
+        # Condition (b) makes it regime-aware: pullback longs in a green session are not blocked.
+        long_block_pts = self.cfg.get("session_disp_long_block_pts")
+        if long_block_pts and direction == "LONG" and "spot_close" in candles.columns:
+            spot_series    = candles["spot_close"]
+            session_open_s = float(spot_series.iloc[0])
+            session_high_s = float(spot_series.max())
+            current_spot   = float(spot_series.iloc[-1])
+            drop_from_high = session_high_s - current_spot
+            if drop_from_high > long_block_pts and current_spot < session_open_s:
+                print(f"  Signal LONG blocked — {drop_from_high:.0f}pts below session high, "
+                      f"{session_open_s - current_spot:.0f}pts below session open")
                 return
 
         print(f"\n  📡 ML SIGNAL: {direction} conf={confidence:.2f}")
