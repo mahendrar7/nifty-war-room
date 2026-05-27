@@ -460,12 +460,6 @@ class MLRunner:
             print(f"  [{datetime.now().strftime('%H:%M:%S')}] Entries blocked — RBI rate decision imminent")
             return
 
-        if self.cfg.get("skip_expiry_day"):
-            expiry = self._get_nearest_expiry()
-            if expiry == date.today():
-                print(f"  [{datetime.now().strftime('%H:%M:%S')}] Entries blocked — expiry day ({expiry})")
-                return
-
         if self.day_suspended:
             print(f"  [{datetime.now().strftime('%H:%M:%S')}] Day suspended — insufficient margin for minimum lots")
             return
@@ -571,6 +565,12 @@ class MLRunner:
                 return
 
         print(f"\n  📡 ML SIGNAL: {direction} conf={confidence:.2f}")
+
+        if self.cfg.get("skip_expiry_day"):
+            expiry = self._get_nearest_expiry()
+            if expiry == date.today():
+                print(f"  [{datetime.now().strftime('%H:%M:%S')}] Entry blocked — expiry day ({expiry}), signal logged only")
+                return
 
         # Track signal candle timestamp for feedback recording at trade close
         self._pending_signal_ts = candles.index[-1]
