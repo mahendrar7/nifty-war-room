@@ -34,10 +34,14 @@ Source note:
 import re
 import sys
 import os
+import json
 import time
 import urllib.parse
 import requests
+from pathlib import Path
 from html.parser import HTMLParser
+
+MSCI_STATE_PATH = Path.home() / ".nifty_tools" / "msci_current.json"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -448,6 +452,45 @@ def _ask_stocks(label: str, stocks: list[dict]) -> list[dict]:
     return result
 
 
+# ── Write shared state file ───────────────────────────────────────────────────
+
+def _write_msci_state(quarter: str, flow: str, flow_usd: str,
+                       removed: list[dict], added: list[dict]):
+    """Write current MSCI quarter to ~/.nifty_tools/msci_current.json.
+    The scanner (nifty_fo_scanner) reads this file — no cross-project imports."""
+    # Pull announce/execution dates from the just-patched econ_calendar.py
+    cal_path = os.path.join(os.path.dirname(__file__), "econ_calendar.py")
+    announce_iso = execution_iso = ""
+    try:
+        with open(cal_path) as f:
+            src = f.read()
+        idx = src.find(f'"{quarter}"')
+        if idx >= 0:
+            block = src[idx:idx + 400]
+            ann_m  = re.search(r'"announce_date"\s*:\s*date\((\d+),\s*(\d+),\s*(\d+)\)', block)
+            exec_m = re.search(r'"execution_date"\s*:\s*date\((\d+),\s*(\d+),\s*(\d+)\)', block)
+            if ann_m:
+                announce_iso  = f"{ann_m.group(1)}-{int(ann_m.group(2)):02d}-{int(ann_m.group(3)):02d}"
+            if exec_m:
+                execution_iso = f"{exec_m.group(1)}-{int(exec_m.group(2)):02d}-{int(exec_m.group(3)):02d}"
+    except Exception as e:
+        print(f"  [state] Could not read dates from econ_calendar.py: {e}")
+
+    state = {
+        "quarter":    quarter,
+        "india_flow": flow,
+        "flow_usd":   flow_usd,
+        "announce":   announce_iso,
+        "execution":  execution_iso,
+        "removed":    removed,
+        "added":      added,
+    }
+    MSCI_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(MSCI_STATE_PATH, "w") as f:
+        json.dump(state, f, indent=2)
+    print(f"  ✅ Shared state written: {MSCI_STATE_PATH}")
+
+
 # ── Patch econ_calendar.py ────────────────────────────────────────────────────
 
 def _patch_econ_calendar(quarter: str, flow: str, flow_usd: str,
@@ -620,6 +663,10 @@ def main():
     confirm = input("\n  Write? [Y/n] ").strip().lower()
     if confirm in ("", "y", "yes"):
         _patch_econ_calendar(
+            quarter, flow_dir_final, flow_amt_final,
+            removed_final, added_final,
+        )
+        _write_msci_state(
             quarter, flow_dir_final, flow_amt_final,
             removed_final, added_final,
         )
