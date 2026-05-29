@@ -115,6 +115,8 @@ def predict_day(model, feature_cols, x_points, test_candles, instrument="nifty")
 
     trend_pts_vals  = df["trend_pts"].values       if "trend_pts"    in df.columns else np.zeros(len(X))
     bias_enc_vals   = df["bias_encoded"].values    if "bias_encoded" in df.columns else np.zeros(len(X))
+    spot_highs      = df["spot_high"].values       if "spot_high"    in df.columns else spots
+    spot_lows       = df["spot_low"].values        if "spot_low"     in df.columns else spots
 
     session_open_spot = float(spots[0]) if len(spots) > 0 else 0.0
 
@@ -132,6 +134,8 @@ def predict_day(model, feature_cols, x_points, test_candles, instrument="nifty")
         results.append({
             "timestamp":              timestamps[i],
             "spot":                   spots[i],
+            "spot_high":              float(spot_highs[i]),
+            "spot_low":               float(spot_lows[i]),
             "signal":                 signal,
             "actual":                 y_true[i],
             "confidence":             confidence,
@@ -158,7 +162,9 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
                      long_conf=None, retracement_pct=None, lot2_entry_buffer=None,
                      sl_circuit_breaker=None, circuit_pause_candles=2,
                      counter_trend_pts_limit=None,
-                     session_disp_long_block_pts=None):
+                     session_disp_long_block_pts=None,
+                     spot_trigger_pts=None,
+                     spot_trigger_trend_limit=None):
     """
     Strict fixed SL/TP simulation on option value.
 
@@ -215,14 +221,44 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
             if drop_from_high > session_disp_long_block_pts and pred["spot"] < session_open_s:
                 continue
 
-        entry_spot = pred["spot"]
+        signal_spot    = pred["spot"]
+        trigger_offset = 0  # candles consumed while waiting for trigger
+
+        # Apply trigger only when trend is weak (trend_pts below limit)
+        trend_pts_now  = abs(pred.get("trend_pts", 0))
+        use_trigger    = (spot_trigger_pts is not None and
+                          (spot_trigger_trend_limit is None or
+                           trend_pts_now < spot_trigger_trend_limit))
+
+        if use_trigger:
+            trigger_window = 2  # matches live runner: 2 × candle_minutes window
+            triggered = False
+            for k in range(min(trigger_window, len(predictions) - i - 1)):
+                chk = predictions[i + 1 + k]
+                if direction == "LONG":
+                    if chk.get("spot_high", chk["spot"]) >= signal_spot + spot_trigger_pts:
+                        triggered = True
+                        trigger_offset = k + 1
+                        signal_spot = signal_spot + spot_trigger_pts
+                        break
+                else:
+                    if chk.get("spot_low", chk["spot"]) <= signal_spot - spot_trigger_pts:
+                        triggered = True
+                        trigger_offset = k + 1
+                        signal_spot = signal_spot - spot_trigger_pts
+                        break
+            if not triggered:
+                cooldown = max(cooldown, trigger_window)
+                continue
+
+        entry_spot = signal_spot
 
         nifty_stop = stop_pts / delta
         nifty_target = target_pts / delta
         lot2_target_pts = round(target_pts * runner_ext, 1)
         lot2_nifty_target = lot2_target_pts / delta
 
-        future = predictions[i + 1:]
+        future = predictions[i + 1 + trigger_offset:]
         candles_held = 0
         exit_reason = ""
         option_pnl = 0.0
@@ -523,6 +559,10 @@ def main():
                         help="Counter-trend gate: block signals opposing trend when trend_pts > N (e.g. 300)")
     parser.add_argument("--session-disp-long-block", type=float, default=None, dest="session_disp_long_block",
                         help="Block LONG when spot is >N pts below session high AND below session open (e.g. 200)")
+    parser.add_argument("--spot-trigger", type=float, default=None, dest="spot_trigger",
+                        help="Require spot to move N pts in signal direction before entering (e.g. 20)")
+    parser.add_argument("--trigger-trend-limit", type=float, default=None, dest="trigger_trend_limit",
+                        help="Apply spot trigger only when abs(trend_pts) < N; enter immediately when trending harder (e.g. 200)")
     parser.add_argument("--exclude", nargs="+", default=None, metavar="COL",
                         help="Extra feature columns to exclude from training (and their _lag1/2/3 variants)")
     args = parser.parse_args()
@@ -548,6 +588,8 @@ def main():
     lot2_floor = args.lot2_floor
     ct_limit   = args.ct_limit
     session_disp_long_block = args.session_disp_long_block
+    spot_trigger = args.spot_trigger
+    trigger_trend_limit = args.trigger_trend_limit
     # Expand --exclude to also cover _lag1/2/3 variants automatically
     extra_exclude = None
     if args.exclude:
@@ -564,7 +606,10 @@ def main():
         print(mode_str)
     if last_n_days:
         print(f"  Validation mode: testing last {last_n_days} days only")
-    print(f"  Candle: {candle_minutes}-min | SL: {stop_pts}pts | TP: {target_pts}pts | Hold: {hold_minutes}min | MinConf: {min_conf}")
+    trigger_str = f" | SpotTrigger: {spot_trigger}pts" if spot_trigger else ""
+    if spot_trigger and trigger_trend_limit:
+        trigger_str += f" (only when trend_pts<{trigger_trend_limit})"
+    print(f"  Candle: {candle_minutes}-min | SL: {stop_pts}pts | TP: {target_pts}pts | Hold: {hold_minutes}min | MinConf: {min_conf}{trigger_str}")
     if long_conf:
         print(f"  Hybrid conf: SHORT≥{min_conf}  LONG≥{long_conf}")
     print(f"  Confidence threshold: {PROBA_THRESHOLD}")
@@ -605,7 +650,9 @@ def main():
                                      long_conf=long_conf, retracement_pct=retracement_pct,
                                      lot2_entry_buffer=lot2_floor,
                                      counter_trend_pts_limit=ct_limit,
-                                     session_disp_long_block_pts=session_disp_long_block)
+                                     session_disp_long_block_pts=session_disp_long_block,
+                                     spot_trigger_pts=spot_trigger,
+                                     spot_trigger_trend_limit=trigger_trend_limit)
             day_pnl = sum(t["pnl"] for t in trades)
             day_results.append({
                 "date": day["date"], "signals_fired": len(signals),
@@ -694,7 +741,9 @@ def main():
                                  long_conf=long_conf, retracement_pct=retracement_pct,
                                  lot2_entry_buffer=lot2_floor,
                                  counter_trend_pts_limit=ct_limit,
-                                 session_disp_long_block_pts=session_disp_long_block)
+                                 session_disp_long_block_pts=session_disp_long_block,
+                                 spot_trigger_pts=spot_trigger,
+                                 spot_trigger_trend_limit=trigger_trend_limit)
         day_pnl = sum(t["pnl"] for t in trades)
 
         day_result = {

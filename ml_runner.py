@@ -60,6 +60,7 @@ RUNNER_CONFIGS = {
         "sl_adjust_trigger_pts":    15,
         "sl_adjust_move_pts":       10,
         "spot_trigger_pts":         20,    # wait for spot to move 20pts in signal direction before entering
+        "spot_trigger_trend_limit": 200,  # skip trigger when abs(trend_pts) >= 200 — market already trending
         "skip_expiry_day":          True,  # block all entries on weekly expiry day
         "session_disp_long_block_pts": 200, # block LONG when spot is this far below session high AND below session open
         "daily_loss_limit":            15000, # stop new entries for the day once closed PnL hits -Rs 15,000
@@ -578,7 +579,11 @@ class MLRunner:
         self._pending_confidence = confidence
 
         trigger_pts = self.cfg.get("spot_trigger_pts")
-        if trigger_pts:
+        trigger_trend_limit = self.cfg.get("spot_trigger_trend_limit")
+        # Skip trigger when market is already trending hard — chasing a running move is worse
+        use_trigger = (trigger_pts is not None and
+                       (trigger_trend_limit is None or abs(trend_pts) < trigger_trend_limit))
+        if use_trigger:
             spot = self._get_spot()
             if spot is None:
                 print("  Cannot get spot — entering immediately")
@@ -589,10 +594,13 @@ class MLRunner:
             self.trigger_expiry  = datetime.now() + timedelta(minutes=window_mins)
             self.state           = TradeState.AWAITING_TRIGGER
             print(f"  ⏳ Awaiting spot trigger: {direction} needs spot to move "
-                  f"{trigger_pts}pts | window={window_mins}min | spot={spot}")
+                  f"{trigger_pts}pts | window={window_mins}min | spot={spot} "
+                  f"(trend_pts={trend_pts:.0f} < limit={trigger_trend_limit})")
             self._send_alert(f"⏳ Signal {direction} conf={confidence:.2f} | "
                              f"Waiting for spot +{trigger_pts}pts @ {spot}")
         else:
+            if trigger_pts and trigger_trend_limit and abs(trend_pts) >= trigger_trend_limit:
+                print(f"  ⚡ Entering immediately — trending {trend_pts:.0f}pts (skip trigger)")
             self._enter_trade(direction, confidence)
 
     # ── Spot Trigger Check ─────────────────────────────────────────────────────
