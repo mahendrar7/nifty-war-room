@@ -48,7 +48,8 @@ class CoilSniper:
 
     def compute(self, straddle, momentum_data, move_prob,
                 call_oi_speed, put_oi_speed, liq_accel, squeeze,
-                pcr_val, velocity, now=None, day_open_spot=None, **kwargs):
+                pcr_val, velocity, now=None, day_open_spot=None,
+                print_box=True, **kwargs):
         """
         Called every tick.  Returns sniper-compatible dict:
           action      : "TAKE TRADE" | "STALK — WAIT FOR TRIGGER" | ""
@@ -133,9 +134,10 @@ class CoilSniper:
         if day_move_gate_blocked:
             setup += "[gate:day↑]"
 
-        self._print_box(score, direction, confidence, action, breakdown, in_cooldown)
+        if print_box:
+            self._print_box(score, direction, confidence, action, breakdown, in_cooldown)
 
-        return self._result(action, direction, score, confidence, setup, breakdown)
+        return self._result(action, direction, score, confidence, setup, breakdown, in_cooldown)
 
     # ── internals ─────────────────────────────────────────────────────────────
 
@@ -271,15 +273,16 @@ class CoilSniper:
         print(Fore.CYAN + "└──────────────────────────────────────────────────┘" + Style.RESET_ALL)
 
     @staticmethod
-    def _result(action, direction, score, confidence, setup, breakdown):
+    def _result(action, direction, score, confidence, setup, breakdown, in_cooldown=False):
         return {
-            "action":     action,
-            "direction":  direction,
-            "score":      score,
-            "confidence": confidence,
-            "setup":      setup,
-            "coil_score": score,
-            "breakdown":  breakdown,
+            "action":      action,
+            "direction":   direction,
+            "score":       score,
+            "confidence":  confidence,
+            "setup":       setup,
+            "coil_score":  score,
+            "breakdown":   breakdown,
+            "in_cooldown": in_cooldown,
             # Fields expected by downstream logging (sniper columns in CSV)
             "htf":        "",
             "htf_adj":    0.0,

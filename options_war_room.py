@@ -634,116 +634,126 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         state.previous_flip_distance = dist
 
     # ==========================================================================
-    # PRINT — minimal actionable layout
+    # PRE-COMPUTE radar + sniper before display (sniper print suppressed)
+    # ==========================================================================
+    if should_compute("radar"):
+        radar_result = radar_scan(
+            spot=spot, flip_level=flip_level,
+            call_wall=call_wall, put_wall=put_wall,
+            df=df, prev_df=state.previous_snapshot,
+            momentum_data=momentum_data,
+            straddle_history=None,
+            profile=PROFILE,
+            spot_history=list(state.spot_history),
+        )
+        cache_result("radar", radar_result)
+        if radar_result.get("active") and state.active_trade is None:
+            r_dir = radar_result["direction"] or "NEUTRAL"
+            _radar_key = f"{r_dir}_{radar_result.get('key_level')}"
+            if not hasattr(state, '_last_radar_alert') or state._last_radar_alert != _radar_key:
+                state._last_radar_alert = _radar_key
+    else:
+        radar_result = get_cached("radar", {"active": False, "direction": None,
+                                             "strength": 0, "signals": [],
+                                             "narrative": "No setup forming",
+                                             "key_level": None, "watch_for": None})
+
+    sniper_result = _sniper.compute(
+        spot=spot, bias=bias, confidence=confidence,
+        gamma=gamma, straddle=straddle, momentum_data=momentum_data,
+        move_prob=move_prob, trap=trap, velocity=velocity,
+        vacuum=vacuum, wall_break_vac=wall_break_vac,
+        flip_breakout=flip_breakout, liq_accel=liq_accel,
+        squeeze=squeeze, trend=trend,
+        call_wall=call_wall, put_wall=put_wall,
+        flip_level=flip_level, regime=regime,
+        days_to_expiry=days_to_expiry,
+        call_oi_speed=call_oi_speed, put_oi_speed=put_oi_speed,
+        gamma_shift=gamma_shift, debug=DEBUG_MODE,
+        gamma_history=list(state.gamma_history),
+        spot_history=list(state.spot_history),
+        profile=PROFILE, radar_result=radar_result,
+        pcr_val=pcr_val, now=datetime.now(),
+        day_open_spot=state.session_open_spot,
+        print_box=False,
+    )
+    sniper_action = sniper_result.get("action", "") if sniper_result else ""
+
+    # ==========================================================================
+    # PRINT — compact layout
     # ==========================================================================
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"\n{'=' * 63} {ts}")
 
-    # Row 1: Spot / ATM / Flip
+    # ── Line 1: Spot / ATM / Flip / IV ───────────────────────────────────────
+    iv_val = theta_ctx.get("atm_iv", 0) if theta_ctx else 0
+    iv_arrow = ("▲" if momentum_5m and momentum_5m > 0.5 else
+                "▼" if momentum_5m and momentum_5m < -0.5 else "")
     flip_tag = ""
     if flip_level:
         dist = abs(spot - flip_level)
         arrow = "↑" if spot > flip_level else "↓"
         if dist <= GAMMA_FLIP_DANGER_ZONE:
-            flip_tag = Fore.LIGHTGREEN_EX + f"  Flip:⚡{flip_level}⚡({dist:.0f}pts)" + Style.RESET_ALL
+            flip_tag = Fore.LIGHTGREEN_EX + f" | Flip:⚡{flip_level}({dist:.0f}pts)" + Style.RESET_ALL
         else:
-            flip_tag = Fore.YELLOW + f"  Flip:{flip_level}({dist:.0f}pts{arrow})" + Style.RESET_ALL
-    print(f"Spot:{round(spot, 1)}  ATM:{atm}{flip_tag}")
+            flip_tag = Fore.YELLOW + f" | Flip:{flip_level}{arrow}{dist:.0f}pts" + Style.RESET_ALL
+    print(f"Spot:{round(spot, 1)} | ATM:{atm}{flip_tag} | IV:{iv_val:.1f}%{iv_arrow}")
 
-    # Row 2: MAP
-    print(f"MAP: {put_wall} → {gravity} → {call_wall}")
-
-    # Row 3: Straddle
-    if momentum_data:
-        m5 = momentum_data["momentum_5m"]
-        straddle_color = Fore.YELLOW if m5 > 2 else (Fore.CYAN if m5 < -2 else "")
-        print(straddle_color +
-              f"Straddle:{round(straddle, 1)}  ±{round(straddle / 2, 1)}  "
-              f"5m:{m5:+.1f}%  {momentum_data['status']}" + Style.RESET_ALL)
-    else:
-        print(f"Straddle:{round(straddle, 1)}  ±{round(straddle / 2, 1)}")
-
-    # Row 3b: Theta buyer lines — always shown, buyer-specific action signals
-    print(theta_dashboard_lines(theta_ctx))
-
-    # Row 4: Bias / Regime
+    # ── Line 2: Regime / Bias / HW ───────────────────────────────────────────
     if bypassed:
-        tracker_tag = f"  {Fore.LIGHTCYAN_EX}[⚡ structural bypass]{Style.RESET_ALL}"
+        tracker_tag = "[⚡bypass]"
     elif rt.candidate_bias and rt.candidate_bias_count > 0:
-        tracker_tag = (f"  {Fore.YELLOW}({rt.candidate_bias} "
-                       f"{rt.candidate_bias_count}/{rt.min_confirm}){Style.RESET_ALL}")
+        tracker_tag = f"[{rt.candidate_bias} {rt.candidate_bias_count}/{rt.min_confirm}]"
     else:
-        tracker_tag = f"  {Fore.WHITE}[{rt.stable_minutes}m]{Style.RESET_ALL}"
-    print(f"{colored_bias(bias)}  Conf:{confidence}%{tracker_tag}  │  {regime}")
+        tracker_tag = f"[{rt.stable_minutes}m]"
+    hw_dir = hw_momentum["direction"] if hw_momentum else "—"
+    hw_color = Fore.GREEN if hw_dir == "BULLISH" else (Fore.RED if hw_dir == "BEARISH" else Fore.WHITE)
+    print(f"{colored_bias(bias)}{Style.RESET_ALL} {confidence}% {tracker_tag}  │  "
+          f"{hw_color}HW:{hw_dir}{Style.RESET_ALL}")
 
-    # Row 5: Heavyweights — top 3 movers + weighted ROC
-    if hw_momentum is not None:
-        hw = hw_momentum
-        hw_color = Fore.GREEN if hw["direction"] == "BULLISH" else (Fore.RED if hw["direction"] == "BEARISH" else Fore.WHITE)
-        top3 = "  ".join(
-            f"{m['name']}:{m['roc']:+.2f}%" for m in hw["movers"][:3]
-        )
-        stall_tag = ""
-        if hw_stall and hw_stall["stalled"]:
-            stall_tag = f"  {Fore.YELLOW}STALLED{Style.RESET_ALL}"
-        print(hw_color + f"HW:{hw['weighted_roc']:+.3f}% {hw['direction']}  {top3}{stall_tag}" + Style.RESET_ALL)
+    # ── Line 3: Active signals + coil + conflict detection ───────────────────
+    signal_parts = []
 
-    # Conditional context — debug only
-    if DEBUG_MODE:
-        if pcr_signal != "NEUTRAL":
-            pcr_color = Fore.GREEN if pcr_signal == "BULLISH" else Fore.RED
-            print(pcr_color + f"PCR:{pcr_val} ({pcr_signal})" + Style.RESET_ALL)
+    # Gamma flip breakout
+    if flip_breakout and flip_breakout["detected"]:
+        fb_dir = flip_breakout["direction"]
+        signal_parts.append(Fore.LIGHTCYAN_EX + f"⚡FLIP {fb_dir}" + Style.RESET_ALL)
+        if not state.gamma_flip_alerted and TELEGRAM_VERBOSE:
+            notify(f"⚡ GAMMA FLIP BREAKOUT {fb_dir} | "
+                   f"Spot {spot} crossed {flip_breakout['flip_level']} with IV expanding")
+            state.gamma_flip_alerted = True
+    else:
+        state.gamma_flip_alerted = False
 
-        atm_row = df[df["strike"] == atm]
-        if not atm_row.empty:
-            c_iv = atm_row["call_iv"].values[0]
-            p_iv = atm_row["put_iv"].values[0]
-            if c_iv is not None and p_iv is not None and abs(c_iv - p_iv) > 0.03:
-                skew_color = Fore.RED if p_iv > c_iv else Fore.GREEN
-                print(skew_color +
-                      f"IV Skew  C:{c_iv * 100:.1f}%  P:{p_iv * 100:.1f}%  "
-                      f"({'put skew — bearish lean' if p_iv > c_iv else 'call skew — bullish lean'})"
-                      + Style.RESET_ALL)
+    # Liquidity acceleration
+    if liq_accel and liq_accel["detected"]:
+        d = liq_accel["direction"]
+        conv = liq_accel["conviction"]
+        sc = liq_accel["score"]
+        la_color = Fore.RED if conv == "HIGH" else Fore.YELLOW
+        signal_parts.append(la_color + f"⚡ACCEL {d}({sc:.0f})" + Style.RESET_ALL)
+        accel_key = f"{d}_{sc // 25}"
+        if state.liq_accel_alerted != accel_key and conv == "HIGH" and TELEGRAM_VERBOSE:
+            notify(f"🚀 LIQUIDITY ACCELERATION {d} | Score:{sc} | Spot {spot}")
+            state.liq_accel_alerted = accel_key
+    else:
+        state.liq_accel_alerted = None
 
-        if oi_imbalance:
-            print(Fore.BLUE + f"OI: {oi_imbalance}" + Style.RESET_ALL)
-        if abs(spot - gamma_wall) <= 50:
-            print(Fore.BLUE + f"Gamma Wall:{gamma_wall} ({abs(spot - gamma_wall):.0f}pts)" + Style.RESET_ALL)
-        if war_strike:
-            print(Fore.YELLOW + f"Strike War: {war_strike}" + Style.RESET_ALL)
-
-    # ==========================================================================
-    # TRIGGERS
-    # ==========================================================================
-    print_divider()
-    any_trigger = False
-
-    # Move probability — only when >= 60
+    # Move probability
     if move_prob["probability"] >= 60:
         prob = move_prob["probability"]
         d = move_prob["direction"]
         conv = move_prob["conviction"]
-        bar = "█" * (prob // 10) + "░" * (10 - prob // 10)
-        conflict_tag = " ⚠CONFLICT" if move_prob["conflicted"] else ""
         mpm_color = Fore.RED if conv == "VERY HIGH" else Fore.YELLOW
-        print(mpm_color +
-              f"📊 MOVE PROB:{prob}%  [{bar}]  {d}  {conv}{conflict_tag}"
-              + Style.RESET_ALL)
-        any_trigger = True
+        ct = " ⚠SPLIT" if move_prob["conflicted"] else ""
+        signal_parts.append(mpm_color + f"📊{d}({prob}%){ct}" + Style.RESET_ALL)
 
     # Vacuum
     if vacuum and vacuum["detected"]:
-        score = vacuum["score"]
-        status = vacuum["status"]
-        d = vacuum["direction"]
-        target = vacuum["target_wall"]
-        target_str = f"  → {target}" if target else ""
-        vac_color = Fore.RED if status == "CONFIRMED" else Fore.YELLOW
-        emoji = "🌪" if status == "CONFIRMED" else "⚠"
-        print(vac_color + f"{emoji} VACUUM {status}  {d}  Score:{score}{target_str}" + Style.RESET_ALL)
-        any_trigger = True
+        vac_color = Fore.RED if vacuum["status"] == "CONFIRMED" else Fore.YELLOW
+        signal_parts.append(vac_color + f"🌪VAC {vacuum['direction']}" + Style.RESET_ALL)
         vac_key = f"{vacuum['direction']}_{vacuum['score'] // 20}"
-        if state.vacuum_alerted != vac_key and status == "CONFIRMED":
+        if state.vacuum_alerted != vac_key and vacuum["status"] == "CONFIRMED":
             if TELEGRAM_VERBOSE:
                 tg = build_vacuum_telegram(vacuum, spot)
                 if tg:
@@ -752,15 +762,10 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     else:
         state.vacuum_alerted = None
 
-    # Wall break vacuum
+    # Wall break
     if wall_break_vac and wall_break_vac["detected"]:
         wb = wall_break_vac
-        target_str = f"  → {wb['target_wall']}" if wb["target_wall"] else ""
-        print(Fore.RED +
-              f"🌪 WALL BREAK  {wb['direction']}  "
-              f"Wall:{wb['broken_wall']} lost {wb['oi_drop_pct'] * 100:.0f}%{target_str}"
-              + Style.RESET_ALL)
-        any_trigger = True
+        signal_parts.append(Fore.RED + f"🌪WBREAK {wb['direction']}" + Style.RESET_ALL)
         wb_key = f"wb_{wb['broken_wall']}"
         if state.vacuum_alerted != wb_key:
             if TELEGRAM_VERBOSE:
@@ -769,36 +774,12 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
                     notify(tg)
             state.vacuum_alerted = wb_key
 
-    # Gamma flip breakout
-    if flip_breakout and flip_breakout["detected"]:
-        fb_dir = flip_breakout["direction"]
-        fb_lvl = flip_breakout["flip_level"]
-        print(Fore.LIGHTCYAN_EX +
-              f"⚡ GAMMA FLIP BREAKOUT  {fb_dir}  Crossed:{fb_lvl}"
-              + Style.RESET_ALL)
-        any_trigger = True
-        if not state.gamma_flip_alerted and TELEGRAM_VERBOSE:
-            notify(
-                f"⚡ GAMMA FLIP BREAKOUT {fb_dir} | "
-                f"Spot {spot} crossed {fb_lvl} with IV expanding"
-            )
-            state.gamma_flip_alerted = True
-    else:
-        state.gamma_flip_alerted = False  # reset only flip breakout flag, not approach flag
-
-    # Trap — only >= 60
+    # Trap
     if trap["confidence"] >= 60:
-        t = trap["type"]
-        conf = trap["confidence"]
-        fade = trap["fade_strike"]
-        rev = trap["reversal_lvl"]
-        ft = trap["fade_type"]
-        rev_str = f"  Rev:{rev}" if rev else ""
-        t_color = Fore.RED if conf >= 80 else Fore.YELLOW
-        t_emoji = "🔥" if conf >= 80 else "🪤"
-        print(t_color + f"{t_emoji} {t}  {conf}%  │  Fade:{fade} {ft}{rev_str}" + Style.RESET_ALL)
-        any_trigger = True
-        trap_key = f"{t}_{conf // 20}"
+        t_color = Fore.RED if trap["confidence"] >= 80 else Fore.YELLOW
+        t_emoji = "🔥" if trap["confidence"] >= 80 else "🪤"
+        signal_parts.append(t_color + f"{t_emoji}TRAP {trap['type']} {trap['confidence']}%" + Style.RESET_ALL)
+        trap_key = f"{trap['type']}_{trap['confidence'] // 20}"
         if state.trap_alerted != trap_key:
             if TELEGRAM_VERBOSE:
                 tg = build_trap_telegram(trap, spot)
@@ -808,68 +789,67 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     else:
         state.trap_alerted = None
 
-    # Strike war break
-    if war_break:
-        msg = f"⚠ WAR BREAK: {war_break}  Spot:{spot}"
-        print(Fore.RED + msg + Style.RESET_ALL)
-        if TELEGRAM_VERBOSE:
-            notify(msg)
-        any_trigger = True
-
-    # Gamma squeeze
-    if squeeze:
-        print(Fore.RED + f"🚀 {squeeze}" + Style.RESET_ALL)
-        if TELEGRAM_VERBOSE:
-            notify(f"🚀 GAMMA SQUEEZE: {squeeze} | Spot {spot}")
-        any_trigger = True
-
-    # OI velocity — SURGE only
+    # OI velocity surge
     if velocity and "SURGE" in velocity and "CONFLICTED" not in velocity:
         vel_color = Fore.GREEN if "BULLISH" in velocity else Fore.RED
-        speed_str = (f"  [{call_oi_speed:+,.0f} / {put_oi_speed:+,.0f}]"
-                     if call_oi_speed is not None else "")
-        print(vel_color + f"⚡ {velocity}{speed_str}" + Style.RESET_ALL)
+        signal_parts.append(vel_color + "⚡OI-SURGE" + Style.RESET_ALL)
         if TELEGRAM_VERBOSE:
-            notify(
-                f"⚡ {'BULLISH' if 'BULLISH' in velocity else 'BEARISH'} FLOW: "
-                f"{velocity} | Spot {spot}"
-            )
-        any_trigger = True
+            notify(f"⚡ {'BULLISH' if 'BULLISH' in velocity else 'BEARISH'} FLOW: "
+                   f"{velocity} | Spot {spot}")
 
-    # Liquidity acceleration
-    if liq_accel and liq_accel["detected"]:
-        d = liq_accel["direction"]
-        conv = liq_accel["conviction"]
-        sc = liq_accel["score"]
-        la_color = Fore.RED if conv == "HIGH" else Fore.YELLOW
-        emoji = "🚀" if conv == "HIGH" else "⚡"
-        print(la_color + f"{emoji} ACCEL {d}  Score:{sc}  {conv}" + Style.RESET_ALL)
-        any_trigger = True
-        accel_key = f"{d}_{sc // 25}"
-        if state.liq_accel_alerted != accel_key and conv == "HIGH" and TELEGRAM_VERBOSE:
-            notify(
-                f"🚀 LIQUIDITY ACCELERATION {d} | Score:{sc} | Spot {spot}"
-            )
-            state.liq_accel_alerted = accel_key
-    else:
-        state.liq_accel_alerted = None
+    # Strike war break + squeeze (rare — keep as-is)
+    if war_break:
+        signal_parts.append(Fore.RED + f"⚠WAR-BREAK {war_break}" + Style.RESET_ALL)
+        if TELEGRAM_VERBOSE:
+            notify(f"⚠ WAR BREAK: {war_break}  Spot:{spot}")
+    if squeeze:
+        signal_parts.append(Fore.RED + "🚀SQUEEZE" + Style.RESET_ALL)
+        if TELEGRAM_VERBOSE:
+            notify(f"🚀 GAMMA SQUEEZE: {squeeze} | Spot {spot}")
 
-    if not any_trigger:
-        print(Fore.WHITE + "—" + Style.RESET_ALL)
+    # Coil
+    coil_dir = None
+    if sniper_result:
+        coil_dir    = sniper_result.get("direction", "NEUTRAL")
+        coil_score  = sniper_result.get("score", 0)
+        coil_action = sniper_result.get("action", "")
+        in_cd       = sniper_result.get("in_cooldown", False)
+        if coil_action == "TAKE TRADE":
+            clabel, ccolor = "FIRE", Fore.GREEN
+        elif coil_action == "STALK — WAIT FOR TRIGGER":
+            clabel, ccolor = "STALK", Fore.YELLOW
+        else:
+            clabel, ccolor = "QUIET", Fore.WHITE
+        cd_tag = "[cd]" if in_cd else ""
+        signal_parts.append(ccolor + f"🌀COIL {clabel} {coil_dir}({coil_score:.1f}){cd_tag}" + Style.RESET_ALL)
 
-    # ==========================================================================
-    # ACTION + TRADE
-    # ==========================================================================
-    print_divider()
+    # Conflict: coil direction vs confirmed market bias
+    main_dir = "LONG" if bias == "BULLISH" else ("SHORT" if bias == "BEARISH" else "NEUTRAL")
+    bias_conflict = (
+        coil_dir and coil_dir != "NEUTRAL" and
+        main_dir != "NEUTRAL" and coil_dir != main_dir
+    )
+    signals_str = "  ".join(signal_parts) if signal_parts else Fore.WHITE + "—" + Style.RESET_ALL
+    if bias_conflict:
+        signals_str += Fore.RED + "  ⚠ CONFLICT" + Style.RESET_ALL
+    print(f"SIGNALS: {signals_str}")
 
+    # ── Line 4: Action ───────────────────────────────────────────────────────
     print(Fore.GREEN + f"ACTION: {action}" + Style.RESET_ALL)
 
-    # Hold the line — active trade OR shadow mode on last suggestion
+    # ── Radar (only when active) ──────────────────────────────────────────────
+    if radar_result.get("active"):
+        r_dir = radar_result["direction"] or "NEUTRAL"
+        r_str = radar_result["strength"]
+        r_color = Fore.GREEN if r_dir == "LONG" else Fore.RED if r_dir == "SHORT" else Fore.YELLOW
+        sig_names = " + ".join(s["signal"] for s in radar_result["signals"])
+        print(r_color + f"📡 RADAR: {r_dir} setup (str:{r_str}) — {sig_names}" + Style.RESET_ALL)
+
+    # ── HTL — active trade ────────────────────────────────────────────────────
     htl = None
-    htl_source = None   # "active" or "shadow"
+    htl_source = None
 
     if state.active_trade is not None:
-        # ── Active trade: full HTL with exit logic ───────────────────────
         htl_source = "active"
         at = state.active_trade
         wall_distance = compute_next_wall_distance(df, spot, at["option_type"])
@@ -889,33 +869,21 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         verdict = htl["verdict"]
         htl_color = (Fore.GREEN if verdict == "HOLD"
                      else Fore.YELLOW if verdict == "TRAIL"
-        else Fore.RED)
+                     else Fore.RED)
         htl_emoji = {"HOLD": "📈", "TRAIL": "⚠", "EXIT": "🚨"}[verdict]
-        top_reason = (htl["exit_reasons"] or htl["trail_reasons"] or htl["hold_reasons"])
-        reason_str = f"  {top_reason[0][:60]}" if top_reason else ""
-        hw_tag = f"  HW:{htl['hw_summary']}" if htl.get("hw_summary") else ""
-        # Price tracker phase display
         pt_tag = ""
         if price_state:
             ps = price_state
-            pt_tag = (f"  LTP:₹{ps['ltp']:.0f} "
-                      f"({ps['gain_pct']:+.0%}) "
-                      f"pk:₹{ps['peak']:.0f} "
-                      f"[{ps['phase']}]")
+            pt_tag = (f"  LTP:₹{ps['ltp']:.0f}({ps['gain_pct']:+.0%})"
+                      f" pk:₹{ps['peak']:.0f} [{ps['phase']}]")
+        top_reason = (htl["exit_reasons"] or htl["trail_reasons"] or htl["hold_reasons"])
+        reason_str = f"  {top_reason[0][:50]}" if top_reason else ""
         print(htl_color +
               f"{htl_emoji} HTL: {verdict}  Score:{htl['hold_score']}  "
-              f"Stop:{htl['stop_suggestion']}{reason_str}" + Style.RESET_ALL)
-        if pt_tag:
-            print(Fore.CYAN + f"   {pt_tag}" + Style.RESET_ALL)
-        if hw_tag:
-            print(Fore.CYAN + f"   {hw_tag}" + Style.RESET_ALL)
-        # Theta race line — is the move outrunning decay?
-        theta_line = theta_trade_log_line(theta_ctx, state.active_trade)
+              f"Stop:{htl['stop_suggestion']}{pt_tag}{reason_str}" + Style.RESET_ALL)
+        theta_line = theta_trade_log_line(theta_ctx, at)
         if theta_line:
             print(theta_line)
-        print(f"   Active: {at['strike']} {at['option_type']} "
-              f"@ ₹{at['entry_price']:.0f}  entered {at.get('entry_time', '?')}")
-
         if verdict == "EXIT":
             notify(
                 f"🚨 EXIT: {at['strike']} {at['option_type']} | "
@@ -925,77 +893,10 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
             _stop_price_tracker()
             state.active_trade = None
 
-    # RADAR — anticipatory setup scanner (recompute every 3 min, print every tick)
-    if should_compute("radar"):
-        radar_result = radar_scan(
-            spot=spot, flip_level=flip_level,
-            call_wall=call_wall, put_wall=put_wall,
-            df=df, prev_df=state.previous_snapshot,
-            momentum_data=momentum_data,
-            straddle_history=None,
-            profile=PROFILE,
-            spot_history=list(state.spot_history),
-        )
-        cache_result("radar", radar_result)
-
-        # Radar Telegram alerts disabled — console-only
-        if radar_result.get("active") and state.active_trade is None:
-            r_dir = radar_result["direction"] or "NEUTRAL"
-            _radar_key = f"{r_dir}_{radar_result.get('key_level')}"
-            if not hasattr(state, '_last_radar_alert') or state._last_radar_alert != _radar_key:
-                state._last_radar_alert = _radar_key
-    else:
-        radar_result = get_cached("radar", {"active": False, "direction": None,
-                                             "strength": 0, "signals": [],
-                                             "narrative": "No setup forming",
-                                             "key_level": None, "watch_for": None})
-
-    # Print radar status every tick
-    if radar_result.get("active"):
-        r_dir = radar_result["direction"] or "NEUTRAL"
-        r_str = radar_result["strength"]
-        r_color = Fore.GREEN if r_dir == "LONG" else Fore.RED if r_dir == "SHORT" else Fore.YELLOW
-        sig_names = " + ".join(s["signal"] for s in radar_result["signals"])
-        print(Fore.MAGENTA + f"{'─' * 63}" + Style.RESET_ALL)
-        print(f"📡 RADAR: {r_color}{Style.BRIGHT}{r_dir} setup (str:{r_str}){Style.RESET_ALL}"
-              f" — {sig_names}")
-        for sig in radar_result["signals"]:
-            s_color = Fore.GREEN if sig["direction"] == "LONG" else Fore.RED if sig["direction"] == "SHORT" else Fore.YELLOW
-            print(f"   {s_color}▸ {sig['signal']}: {sig['narrative']}{Style.RESET_ALL}")
-        if radar_result.get("watch_for"):
-            print(f"   {Fore.WHITE}👁 {radar_result['watch_for']}{Style.RESET_ALL}")
-        print(Fore.MAGENTA + f"{'─' * 63}" + Style.RESET_ALL)
-    else:
-        print(f"📡 RADAR: {Fore.WHITE}quiet — no setup{Style.RESET_ALL}")
-
-    # SNIPER — decides WHETHER to trade and DIRECTION
-    # NiftySniper: score-based (existing logic)
-    # CoilSniper:  pre-move coil detection (SENSEX)
-    sniper_result = _sniper.compute(
-        spot=spot, bias=bias, confidence=confidence,
-        gamma=gamma, straddle=straddle, momentum_data=momentum_data,
-        move_prob=move_prob, trap=trap, velocity=velocity,
-        vacuum=vacuum, wall_break_vac=wall_break_vac,
-        flip_breakout=flip_breakout, liq_accel=liq_accel,
-        squeeze=squeeze, trend=trend,
-        call_wall=call_wall, put_wall=put_wall,
-        flip_level=flip_level, regime=regime,
-        days_to_expiry=days_to_expiry,
-        call_oi_speed=call_oi_speed, put_oi_speed=put_oi_speed,
-        gamma_shift=gamma_shift, debug=DEBUG_MODE,
-        gamma_history=list(state.gamma_history),
-        spot_history=list(state.spot_history),
-        profile=PROFILE, radar_result=radar_result,
-        pcr_val=pcr_val, now=datetime.now(),
-        day_open_spot=state.session_open_spot,
-    )
-
-    # TRADE SUGGESTION — only when sniper endorses
+    # ── Trade suggestion — when sniper fires ─────────────────────────────────
     trade = None
-    sniper_action = sniper_result.get("action", "") if sniper_result else ""
-
     if sniper_action in ("TAKE TRADE", "SEND IT") and state.active_trade is None and sniper_result.get("score", 0) >= 7:
-        sniper_dir = sniper_result["direction"]   # "LONG", "SHORT", or "NEUTRAL"
+        sniper_dir = sniper_result["direction"]
         if sniper_dir != "NEUTRAL":
             trade_direction = "CALL" if sniper_dir == "LONG" else "PUT"
             trade = suggest_trade(
@@ -1026,8 +927,6 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
         print(Fore.GREEN +
               f"  ✅ AUTO-ENTERED → HTL active  │  /exit {_instrument_arg} to close"
               + Style.RESET_ALL)
-
-        # Telegram with full trade details
         icon = "🎯🎯🎯" if sniper_action == "SEND IT" else "🎯"
         sniper_notify(
             notify,
@@ -1043,7 +942,6 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
             ),
         )
     elif sniper_action in ("TAKE TRADE", "SEND IT") and sniper_result.get("score", 0) >= 7:
-        # Sniper endorsed but no viable strike/sizing — still alert
         icon = "🎯🎯🎯" if sniper_action == "SEND IT" else "🎯"
         sniper_notify(
             notify,
@@ -1056,7 +954,7 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
             ),
         )
 
-    # Clear last_suggestion when sniper rejects (but keep during STALK/LOCKED)
+    # Clear last_suggestion when sniper rejects (keep during STALK/LOCKED)
     if sniper_action not in ("TAKE TRADE", "SEND IT", "STALK — WAIT FOR TRIGGER", "LOCKED") \
             and state.active_trade is None:
         state.last_suggestion = None
@@ -1068,6 +966,11 @@ def print_dashboard(df, spot, atm, momentum_strikes, expiry,
     # ==========================================================================
     if DEBUG_MODE:
         print_divider(char="-")
+        print(f"MAP: {put_wall} → {gravity} → {call_wall}")
+        if momentum_data:
+            m5 = momentum_data["momentum_5m"]
+            print(f"Straddle:{round(straddle, 1)}  ±{round(straddle / 2, 1)}  5m:{m5:+.1f}%  {momentum_data['status']}")
+        print(theta_dashboard_lines(theta_ctx))
         print(f"GEX:{int(gamma):,}  Dealer:{gamma_shift}  OI:{oi_signal}")
         print(f"Magnet:{magnet_strike}({magnet_prob}%)  GammaWall:{gamma_wall}  Mode:{mode}")
         # NEW: trend and wall retreat debug
