@@ -456,9 +456,12 @@ class MLRunner:
         return now.replace(minute=next_min, second=0, microsecond=0)
 
     def _check_signal(self):
-        from econ_calendar import rate_decision_imminent
+        from econ_calendar import rate_decision_imminent, msci_close_block
         if rate_decision_imminent():
             print(f"  [{datetime.now().strftime('%H:%M:%S')}] Entries blocked — RBI rate decision imminent")
+            return
+        if msci_close_block():
+            print(f"  [{datetime.now().strftime('%H:%M:%S')}] Entries blocked — MSCI rebalancing close window")
             return
 
         if self.day_suspended:
