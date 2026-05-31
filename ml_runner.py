@@ -67,16 +67,16 @@ RUNNER_CONFIGS = {
         "paper_starting_margin":       60000, # simulated starting margin for paper mode
     },
     "nifty": {
-        "sl_pts":                   8,
-        "tp_pts":                   10,
-        "runner_ext":               2.2,
+        "sl_pts":                   7,
+        "tp_pts":                   12,
+        "runner_ext":               1.833,
         "retracement_pct":          0.07,
         "lot2_floor_pts":           3,
         "sl_circuit_breaker":       2,
         "circuit_pause_candles":    2,
-        "counter_trend_pts_limit":  75,
+        "counter_trend_pts_limit":  100,
         "min_conf_short":           0.55,
-        "min_conf_long":            0.55,
+        "min_conf_long":            0.75,
         "lot_size":                 65,
         "default_lots":             4,
         "hold_candles":             9,
@@ -86,9 +86,10 @@ RUNNER_CONFIGS = {
         "trail_update_pts":         2,
         "sl_adjust_trigger_pts":    15,
         "sl_adjust_move_pts":       10,
-        "spot_trigger_pts":         None,  # None = enter immediately; set to e.g. 20 to wait for spot confirmation
+        "spot_trigger_pts":         7,    # wait for spot to move 7pts in signal direction before entering
+        "spot_trigger_trend_limit": 67,   # skip trigger when abs(trend_pts) >= 67 — market already trending
         "skip_expiry_day":          False, # block all entries on weekly expiry day
-        "session_disp_long_block_pts": None, # disabled for NIFTY
+        "session_disp_long_block_pts": 67, # block LONG when spot is >67pts below session high AND below session open
         "daily_loss_limit":            None, # disabled for NIFTY
         "paper_starting_margin":       None, # disabled for NIFTY
     },
