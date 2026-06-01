@@ -275,28 +275,38 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
 
         for j, fp in enumerate(future):
             candles_held = j + 1
+            # Close-based move — used only for TIME/EOD exits
             move = fp["spot"] - entry_spot
             if direction == "SHORT":
                 move = -move
 
-            if move > peak_move:
-                peak_move = move
-            if move < worst_move:
-                worst_move = move
+            # Intrabar best (TP direction) and worst (SL direction) using H/L.
+            # SL takes priority if both are breached in the same candle.
+            if direction == "LONG":
+                intra_best  = fp.get("spot_high", fp["spot"]) - entry_spot
+                intra_worst = fp.get("spot_low",  fp["spot"]) - entry_spot
+            else:
+                intra_best  = entry_spot - fp.get("spot_low",  fp["spot"])
+                intra_worst = entry_spot - fp.get("spot_high", fp["spot"])
+
+            if intra_best > peak_move:
+                peak_move = intra_best
+            if intra_worst < worst_move:
+                worst_move = intra_worst
 
             if runner:
                 if lot1_pnl is None:
-                    # Both lots open
-                    if move <= -nifty_stop:
+                    # Both lots open — SL checked first; if both breach, SL wins
+                    if intra_worst <= -nifty_stop:
                         lot1_pnl = lot2_pnl = -stop_pts
                         lot1_exit = lot2_exit = "SL"
                         exit_reason = "SL"
                         break
-                    if move >= nifty_target:
+                    if intra_best >= nifty_target:
                         lot1_pnl = target_pts
                         lot1_exit = "TP"
                         lot1_tp_candle = j
-                        lot2_peak = move  # seed lot2 peak at TP exit point
+                        lot2_peak = intra_best  # seed lot2 peak at intrabar best
                         # lot 2 continues — don't break
                     if lot1_pnl is None and candles_held >= max_candles:
                         opt_val = move * delta
@@ -306,9 +316,9 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
                         break
 
                 if lot1_pnl is not None and lot2_pnl is None and j > lot1_tp_candle:
-                    # Lot 2 running — update peak for trailing stop
-                    if move > lot2_peak:
-                        lot2_peak = move
+                    # Lot 2 running — update peak using intrabar best
+                    if intra_best > lot2_peak:
+                        lot2_peak = intra_best
                     # Resolve floor in spot and option pts
                     if lot2_entry_buffer is not None:
                         floor_spot = lot2_entry_buffer / delta
@@ -332,12 +342,13 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
                         lot2_floor = floor_spot
                         lot2_floor_pts = floor_opt
                         lot2_floor_label = floor_label_base
-                    if move <= lot2_floor:
+                    # Use intra_worst for floor breach, intra_best for TP2
+                    if intra_worst <= lot2_floor:
                         lot2_pnl = lot2_floor_pts
                         lot2_exit = lot2_floor_label
                         exit_reason = lot2_floor_label
                         break
-                    if move >= lot2_nifty_target:
+                    if intra_best >= lot2_nifty_target:
                         lot2_pnl = lot2_target_pts
                         lot2_exit = "TP2"
                         exit_reason = "TP2"
@@ -349,11 +360,12 @@ def simulate_ml_pnl(predictions, x_points, candle_minutes=15,
                         exit_reason = "TIME"
                         break
             else:
-                if move <= -nifty_stop:
+                # SL checked first; if both breach, SL wins
+                if intra_worst <= -nifty_stop:
                     option_pnl = -stop_pts
                     exit_reason = "SL"
                     break
-                if move >= nifty_target:
+                if intra_best >= nifty_target:
                     option_pnl = target_pts
                     exit_reason = "TP"
                     break

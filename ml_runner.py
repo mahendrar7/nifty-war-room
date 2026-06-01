@@ -40,7 +40,7 @@ from config import INSTRUMENT_PROFILES, RISK_FREE_RATE
 
 RUNNER_CONFIGS = {
     "sensex": {
-        "sl_pts":                   15,
+        "sl_pts":                   17,
         "tp_pts":                   25,
         "runner_ext":               2.16,
         "retracement_pct":          0.07,
@@ -91,7 +91,7 @@ RUNNER_CONFIGS = {
         "skip_expiry_day":          False, # block all entries on weekly expiry day
         "session_disp_long_block_pts": 67, # block LONG when spot is >67pts below session high AND below session open
         "daily_loss_limit":            None, # disabled for NIFTY
-        "paper_starting_margin":       None, # disabled for NIFTY
+        "paper_starting_margin":       30000, # disabled for NIFTY
     },
 }
 
